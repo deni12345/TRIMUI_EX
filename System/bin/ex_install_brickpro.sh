@@ -3,7 +3,8 @@ set -eu
 . "${EX_SYSTEM_PATH:-/mnt/SDCARD/System}/etc/ex_config"
 [ "$EX_MODEL" = TG4040 ] || { echo 'This installer requires TG4040.' >&2; exit 1; }
 [ "$(uname -m)" = aarch64 ] || exit 1
-"$EX_BASH" -c 'test -n "$BASH_VERSION"'
+# Validate the menu's missing-login-variable case, not the SSH environment.
+env -i EX_SYSTEM_PATH="$EX_SYSTEM_PATH" "$EX_BASH" -c 'test -n "$BASH_VERSION"'
 
 # Extract the existing Python payload only when this is a fresh SD install.
 if [ ! -x "$EX_SYSTEM_PATH/bin/python3" ]; then
@@ -43,13 +44,14 @@ save_original retroarch_binary /usr/local/lib/trimui-ex/retroarch
 
 # Keep the shebang interpreter on internal storage so removing the SD never
 # leaves /bin/bash pointing at an unavailable card. /bin/sh and busybox stay stock.
-if ! cmp -s "$EX_BASH" /usr/local/bin/trimui-ex-bash; then
-    cp "$EX_BASH" /usr/local/bin/trimui-ex-bash.new
+if ! cmp -s "$EX_SYSTEM_PATH/bin/bash.real" /usr/local/bin/trimui-ex-bash; then
+    cp "$EX_SYSTEM_PATH/bin/bash.real" /usr/local/bin/trimui-ex-bash.new
     chmod 755 /usr/local/bin/trimui-ex-bash.new
     mv /usr/local/bin/trimui-ex-bash.new /usr/local/bin/trimui-ex-bash
 fi
-if [ "$(readlink /bin/bash || true)" != /usr/local/bin/trimui-ex-bash ]; then
-    ln -s /usr/local/bin/trimui-ex-bash /bin/bash.trimui-ex-new
+if ! cmp -s "$EX_SYSTEM_PATH/lib/trimui-ex/bash-internal.sh" /bin/bash; then
+    cp "$EX_SYSTEM_PATH/lib/trimui-ex/bash-internal.sh" /bin/bash.trimui-ex-new
+    chmod 755 /bin/bash.trimui-ex-new
     mv -f /bin/bash.trimui-ex-new /bin/bash
 fi
 if [ ! -e /usr/bin/retroarch ]; then

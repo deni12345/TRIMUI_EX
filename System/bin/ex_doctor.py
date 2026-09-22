@@ -19,6 +19,13 @@ def main():
               "firmware": Path("/etc/version").read_text().strip(),
               "bash": subprocess.check_output(["/bin/bash", "-c", 'printf "%s" "$BASH_VERSION"'], text=True),
               "openssl": ssl.OPENSSL_VERSION}
+    # A normal SSH environment masked a startup SIGSEGV in the original static
+    # Bash integration. Both public entry points must work without SHELL/HOME.
+    report["bash_without_login_environment"] = {
+        path: subprocess.check_output([path, "-c", 'printf "%s" "$BASH_VERSION"'],
+                                      env={}, text=True)
+        for path in ("/bin/bash", "/mnt/SDCARD/System/bin/bash")
+    }
     pm = Path("/mnt/SDCARD/Apps/PortMaster/PortMaster")
     sys.path[:0] = [str(pm / "pylibs"), str(pm / "exlibs")]
     from harbourmaster.hardware import device_info

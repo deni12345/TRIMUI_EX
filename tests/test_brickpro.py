@@ -43,6 +43,34 @@ def new_device_info():
             subprocess.run(["bash", "-n"], input=result, text=True, check=True)
 
 
+class BashEntryTests(unittest.TestCase):
+    def test_missing_shell_and_script_shebang_preserve_arguments_and_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            system = Path(directory)
+            (system / "bin").mkdir()
+            wrapper = system / "bin/bash"
+            shutil.copy2(ROOT / "System/bin/bash", wrapper)
+            (system / "bin/bash.real").symlink_to(shutil.which("bash"))
+            game = system / "A game.sh"
+            game.write_text(f'#!{wrapper}\na=(one two)\nprintf "%s|%s|%s" "$SHELL" "${{a[1]}}" "$1"\nexit 23\n')
+            game.chmod(0o755)
+            # No inherited login/SSH variables; reproduces the menu condition.
+            result = subprocess.run([str(game), "argument with spaces"],
+                                    env={"EX_SYSTEM_PATH": str(system)}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertEqual(result.stdout, "/bin/sh|two|argument with spaces")
+
+    def test_existing_shell_is_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            system = Path(directory)
+            (system / "bin").mkdir()
+            (system / "bin/bash.real").symlink_to(shutil.which("bash"))
+            result = subprocess.run([str(ROOT / "System/bin/bash"), "-c", 'printf "%s" "$SHELL"'],
+                                    env={"EX_SYSTEM_PATH": str(system), "SHELL": "/bin/custom-shell"},
+                                    capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout, "/bin/custom-shell")
+
+
 class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

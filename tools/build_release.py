@@ -42,7 +42,7 @@ def main():
             failed = archive.testzip()
             if failed is not None:
                 raise RuntimeError(f"ZIP integrity check failed: {failed}")
-            for name in ("System/bin/bash", "System/bin/setterm", "Emus/PORTS/launch_balanced.sh"):
+            for name in ("System/bin/bash", "System/bin/bash.real", "System/bin/setterm", "Emus/PORTS/launch_balanced.sh"):
                 assert archive.getinfo(name).external_attr >> 16 & 0o111, name
             count = len(archive.namelist())
         output = ROOT / "TRIMUI_EX.zip"

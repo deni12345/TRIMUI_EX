@@ -50,7 +50,7 @@ The installer saves original internal files once in
 | Path | Purpose |
 | --- | --- |
 | `/usr/local/bin/trimui-ex-bash` | Genuine Bash stored internally |
-| `/bin/bash` | Link to that interpreter; `/bin/sh` is preserved |
+| `/bin/bash` | Shell-initializing wrapper for that interpreter; `/bin/sh` is preserved |
 | `/usr/bin/retroarch` | Link to the SD wrapper, only if previously absent |
 | `/usr/local/lib/trimui-ex/retroarch` | Named link to the stock SD binary |
 | `/roms/ports/PortMaster/control.txt` | Updated fallback for ordinary port scripts |
@@ -80,6 +80,11 @@ python3 /mnt/SDCARD/System/bin/ex_doctor.py --https
 
 Hardware checks cover Bash, model/capabilities, controller enumeration, library
 loading, HTTPS and bounded launches of PortMaster, 2048 and Alien Blaster.
+The initial SSH-only checks missed a static Bash startup crash when `SHELL` was
+absent, as it is in the stock menu environment. Both Bash entry points now
+initialize that variable before starting the binary. Regression checks cover
+an empty environment and script shebang execution; device validation must use
+the actual stock menu runner, not just an SSH process with exported configuration.
 They do not establish that every PortMaster game works or validate physical
 buttons, stick calibration, rumble, Bluetooth, suspend/resume, or long play sessions.
 The firmware exposes no ARMHF loader on the tested device; games that require an
