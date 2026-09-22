@@ -1,20 +1,49 @@
 #!/bin/sh
-
-export PATH="/mnt/SDCARD/System/bin:$PATH"
-export LD_LIBRARY_PATH="/mnt/SDCARD/System/lib:/usr/trimui/lib:$LD_LIBRARY_PATH"
-export EX_CONFIG_PATH="/mnt/SDCARD/System/etc"
-export EX_RESOURCE_PATH="/mnt/SDCARD/System/resources"
-
-export TRIMUI_VERSION=$(grep 'DISTRIB_DESCRIPTION' /etc/openwrt_release | cut -d '.' -f 3)
-
-export NETWORK_FIX="Y"
-export NETWORK_SSH="Y"
-export NETWORK_SFTPGO="Y"
-
-if [ $TRIMUI_VERSION -gt 20240401 ]; then
-    # They fixed the mac address in: 20240413
-    export NETWORK_FIX="N"
+# Shared by stock ash startup scripts and Bash PortMaster launchers.
+EX_SYSTEM_PATH=${EX_SYSTEM_PATH:-/mnt/SDCARD/System}
+export EX_SYSTEM_PATH
+export EX_CONFIG_PATH="$EX_SYSTEM_PATH/etc"
+export EX_RESOURCE_PATH="$EX_SYSTEM_PATH/resources"
+export EX_MODEL="$(tr -d '\000\r\n' < "${EX_MODEL_FILE:-/etc/model}" 2>/dev/null)"
+case ":$PATH:" in
+    *":$EX_SYSTEM_PATH/bin:"*) ;;
+    *) PATH="$EX_SYSTEM_PATH/bin:$PATH" ;;
+esac
+export PATH
+# Ports use the stock Linux framebuffer console, including when started via SSH.
+case "${TERM:-}" in ""|dumb) TERM=linux ;; esac
+export TERM
+# Keep vendor SDL and GPU libraries together on TG4040. Games may prepend
+# their own libraries. Avoid an empty (current directory) library path entry.
+case "$EX_MODEL" in
+    TG4040) EX_LIBRARIES="/usr/trimui/lib:$EX_SYSTEM_PATH/lib" ;;
+    *) EX_LIBRARIES="$EX_SYSTEM_PATH/lib:/usr/trimui/lib" ;;
+esac
+case "${LD_LIBRARY_PATH:-}" in
+    "$EX_LIBRARIES"|"$EX_LIBRARIES":*) ;;
+    *) LD_LIBRARY_PATH="$EX_LIBRARIES${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+esac
+export LD_LIBRARY_PATH
+# Bundled OpenSSL's compiled-in /usr/lib/ssl trust paths do not exist on stock
+# firmware. Keep certificate verification enabled with the supplied CA bundle.
+if [ -z "${SSL_CERT_FILE:-}" ] && [ -r "$EX_SYSTEM_PATH/updates/update_001/ca-certificates.crt" ]; then
+    SSL_CERT_FILE="$EX_SYSTEM_PATH/updates/update_001/ca-certificates.crt"
+    export SSL_CERT_FILE
 fi
-
-# Override the above options in the file below
-[ -f "$EX_CONFIG_PATH/ex_options" ] && source "$EX_CONFIG_PATH/ex_options"
+TRIMUI_VERSION=$(sed -n "s/^DISTRIB_DESCRIPTION='[^.]*\.[^.]*\.\([0-9]*\)\..*/\1/p" "${EX_RELEASE_FILE:-/etc/openwrt_release}" 2>/dev/null)
+export TRIMUI_VERSION
+NETWORK_FIX=N
+NETWORK_SSH=Y
+NETWORK_SFTPGO=Y
+# Only old, known Smart Pro firmware needs the MAC workaround.
+case "$EX_MODEL:$TRIMUI_VERSION" in
+    TG4040:*|TG3040:*|*:) ;;
+    *) case "$TRIMUI_VERSION" in
+           *[!0-9]*) ;;
+           *) [ "$TRIMUI_VERSION" -le 20240401 ] && NETWORK_FIX=Y ;;
+       esac ;;
+esac
+EX_BASH="$EX_SYSTEM_PATH/bin/bash"
+[ -f "$EX_CONFIG_PATH/ex_options" ] && . "$EX_CONFIG_PATH/ex_options"
+export NETWORK_FIX NETWORK_SSH NETWORK_SFTPGO EX_BASH
+true

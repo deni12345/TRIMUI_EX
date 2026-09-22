@@ -3,3 +3,7 @@ TRIMUI_EX.zip
 ._*
 
 firmware/
+__pycache__/
+*.pyc
+brickpro-deploy-manifest.json
+System/backups/

@@ -1,10 +1,10 @@
 #!/bin/sh
 
-source /mnt/SDCARD/System/etc/ex_config
+. /mnt/SDCARD/System/etc/ex_config
 
 mkdir -p ~/.config/
 
-if [[ "$NETWORK_FIX" == "Y" ]]; then
+if [ "$NETWORK_FIX" = "Y" ]; then
 
     if [ ! -f "$EX_CONFIG_PATH/mac_addr.conf" ]; then
         # Generate random bytes
@@ -16,7 +16,7 @@ if [[ "$NETWORK_FIX" == "Y" ]]; then
         # Output the random MAC address
         echo "MAC_ADDR=$MAC_ADDR" >> "$EX_CONFIG_PATH/mac_addr.conf"
     else
-        source "$EX_CONFIG_PATH/mac_addr.conf"
+        . "$EX_CONFIG_PATH/mac_addr.conf"
     fi
 
     ## MAC ADDRESS STUFF FROM: https://github.com/tGecko/TrimUI-Smart-Pro-resources?tab=readme-ov-file#startup-script
@@ -27,17 +27,17 @@ if [[ "$NETWORK_FIX" == "Y" ]]; then
     ifconfig wlan0 up
 fi
 
-/mnt/SDCARD/System/bin/ex_update.sh
+/mnt/SDCARD/System/bin/ex_update.sh || exit 1
 
-if [[ "$NETWORK_SSH" == "Y" ]]; then
+if [ "$NETWORK_SSH" = "Y" ]; then
     mkdir -p /etc/dropbear
 
     # Currently broken
-    nice -2 dropbear -R
+    pidof dropbear >/dev/null || nice -2 dropbear -R
 fi
 
-if [[ "$NETWORK_SFTPGO" == "Y" ]]; then
+if [ "$NETWORK_SFTPGO" = "Y" ]; then
     mkdir -p /opt/sftpgo
 
-    nice -2 /mnt/SDCARD/System/sftpgo/sftpgo serve -c /mnt/SDCARD/System/sftpgo/ > /dev/null &
+    pidof sftpgo >/dev/null || nice -2 /mnt/SDCARD/System/sftpgo/sftpgo serve -c /mnt/SDCARD/System/sftpgo/ > /dev/null &
 fi

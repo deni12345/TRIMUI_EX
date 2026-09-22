@@ -1,39 +1,29 @@
 #!/bin/sh
-
-source /mnt/SDCARD/System/etc/ex_config
-EMU_DIR="/mnt/SDCARD/Emus/PORTS"
-
-selected_option=$(grep "dowork 0x" "/tmp/log/messages" | tail -n 1 | sed -e 's/.*: \(.*\) dowork 0x.*/\1/')
-
-$EMU_DIR/cpufreq.sh "$selected_option"
-
-PORTS_DIR=/mnt/SDCARD/Roms/PORTS
-cd "$PORTS_DIR"
-
-################ Fix for TSP controls ################
-
-FILE="$@"
-LINE_TO_ADD="sleep 0.3 # For TSP only, do not move/modify this line."
-
-# Check if the line already exists
-if ! grep -q "$LINE_TO_ADD" "$FILE"; then
-    # Use awk to insert the line after the target line only if it doesn't already exist
-    awk -v line="$LINE_TO_ADD" '
-    BEGIN { line_inserted = 0 }
-    /^[[:space:]]*\$GPTOKEYB[[:space:]]*.*&[[:space:]]*$/ {
-        print $0
-        if (!line_inserted) {
-            print line
-            line_inserted = 1
-        }
-        next
-    }
-    { print $0 }
-    ' "$FILE" >/tmp/port_tmp.sh && mv /tmp/port_tmp.sh "$FILE"
+. "${EX_SYSTEM_PATH:-/mnt/SDCARD/System}/etc/ex_config" || exit 1
+EMU_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+[ "$#" -gt 0 ] && [ -f "$1" ] || { echo "Port script not found: ${1:-<none>}" >&2; exit 1; }
+case "$1" in
+    /*) port=$1 ;;
+    *) port="$PWD/$1" ;;
+esac
+shift
+# Old TRIMUI_EX aliases /bin/bash to ash. Never silently run Bash ports with it.
+if ! "$EX_BASH" -c 'test -n "$BASH_VERSION"' 2>/dev/null; then
+    echo "TRIMUI_EX requires genuine Bash at $EX_BASH. Run the installer." >&2
+    exit 1
 fi
-sync
-
-######################################################
-
-export LD_LIBRARY_PATH="/mnt/SDCARD/System/lib:$LD_LIBRARY_PATH"
-/bin/sh "$@"
+"$EX_SYSTEM_PATH/bin/ex_portmaster.sh" || exit 1
+cpu_state=$("$EMU_DIR/cpufreq.sh" save)
+restore_cpu() {
+    if [ -n "$cpu_state" ]; then
+        # State contains exactly three validated numeric/governor fields.
+        "$EMU_DIR/cpufreq.sh" restore $cpu_state
+    fi
+}
+trap restore_cpu EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+"$EMU_DIR/cpufreq.sh" "${EX_CPU_PROFILE:-Balanced}" || exit 1
+cd "${EX_PORTS_PATH:-/mnt/SDCARD/Roms/PORTS}" || exit 1
+"$EX_BASH" "$port" "$@"
+exit $?

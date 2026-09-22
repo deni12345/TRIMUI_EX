@@ -1,7 +1,4 @@
-
-find . -iname '.DS_Store' -or -iname '._*' -delete -print
-
-rm -vf TRIMUI_EX.zip
-
-echo "Creating TRIMUI_EX.zip"
-zip -9r TRIMUI_EX.zip System/ Roms/ Imgs/ Emus/ -x '*.DS_Store'
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")"
+exec python3 tools/build_release.py

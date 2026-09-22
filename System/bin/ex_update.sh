@@ -1,5 +1,12 @@
 #!/bin/sh
 
+. /mnt/SDCARD/System/etc/ex_config || exit 1
+# TG4040 already has a newer stock userspace. Never run the old firmware
+# bootstrap that replaces /bin/busybox on this device.
+if [ "$EX_MODEL" = TG4040 ]; then
+    exec /mnt/SDCARD/System/bin/ex_install_brickpro.sh
+fi
+
 UPDATES_DIR="/mnt/SDCARD/System/updates/"
 
 if [ -f "/mnt/SDCARD/TRIMUI_EX.zip" ] && [ -e "/bin/bash" ]; then
@@ -18,11 +25,12 @@ if [ -f "/mnt/SDCARD/TRIMUI_EX.zip" ] && [ -e "/bin/bash" ]; then
     rm -f "/mnt/SDCARD/TRIMUI_EX.zip" >> "$UPDATES_DIR/update.log"
 fi
 
-RESTORE_DIR="$(cwd)"
+RESTORE_DIR="$(pwd)"
 cd "$UPDATES_DIR" || exit 1
 
-for script in $(ls -1v update_*.sh); do
-    sh "$script" >> "$UPDATES_DIR/update.log"
+for script in update_[0-9][0-9][0-9].sh; do
+    [ -f "$script" ] || continue
+    sh "$script" >> "$UPDATES_DIR/update.log" || exit 1
 done
 
 cd "$RESTORE_DIR"

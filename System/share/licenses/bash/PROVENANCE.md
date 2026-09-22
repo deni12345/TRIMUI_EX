@@ -1,0 +1,12 @@
+# GNU Bash for AArch64
+
+Package: Debian `bash-static_5.1-2+deb11u1_arm64.deb`.
+Downloaded from https://deb.debian.org/debian/pool/main/b/bash/ over HTTPS.
+Package SHA-256: `df79bca8223cba174e338dfb59d3ccfd2110c85673a12d88cf6d56593aa13f11`.
+`System/bin/bash` SHA-256: `5dc3de6983f3ed54837b60d70ed73e9aa9849692d0f91a8e15446068b522bdfc`.
+
+This is the unmodified `/bin/bash-static` from that package: static AArch64 ELF,
+minimum kernel 3.7.0. It does not replace stock BusyBox or `/bin/sh`.
+The exact upstream source, Debian patches/build rules and `.dsc` are in
+`sources/bash/` at the repository root. Include that directory when distributing
+the binary. Copyright notices and GPLv3 are adjacent to this file.

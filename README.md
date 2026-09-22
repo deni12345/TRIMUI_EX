@@ -1,5 +1,13 @@
 # TRIMUI_EX
 
+## Brick Pro (TG4040)
+
+This branch adds stock-firmware Brick Pro support. See [BRICK_PRO.md](BRICK_PRO.md)
+for installation, tests, limitations and rollback. **Do not follow the legacy
+reflash instructions below on a Brick Pro**: TG3040 and TG5040 firmware images
+are for different hardware. A TG4040 installation preserves the stock kernel,
+BusyBox, SDL and GPU drivers and installs its compatibility layer separately.
+
 This is a simple framework that will be used to bootstrap PortMaster. But like everything it has spiraled out of control...
 
 ## Installation Instructions
