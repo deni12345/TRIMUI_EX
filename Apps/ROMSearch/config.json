@@ -1,0 +1,7 @@
+{
+  "label": "ROM Search",
+  "icon": "icon.png",
+  "iconsel": "icon.png",
+  "launch": "launch.sh",
+  "description": "Search ROM sites and download into emulator folders"
+}

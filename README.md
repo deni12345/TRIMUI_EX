@@ -92,6 +92,13 @@ Download the latest [TRIMUI_EX.zip](https://github.com/kloptops/TRIMUI_EX/releas
 
 From there it should be all setup, PortMaster is under apps, Ports get installed into Roms.
 
+The Brick Pro release also includes **ROM Search** under Apps. It provides a
+controller interface for CoolROM and RomsFun searches, saves downloads into
+matching existing emulator folders, and adds matching PNG thumbnails. Small
+sample downloads from both sites were verified on a Brick Pro.
+See
+`Apps/ROMSearch/README.md` for controls and current limitations.
+
 I have added SFTPgo so you can access your files from the web browser, the url is `http://<ipaddress>:8080/`, you can also sftp on port `2022`.
 
 - Username: `trimui`

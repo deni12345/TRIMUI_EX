@@ -8,7 +8,7 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-INCLUDE = ("System", "Roms", "Imgs", "Emus", "sources", "tools",
+INCLUDE = ("System", "Roms", "Imgs", "Emus", "Apps", "sources", "tools",
            "BRICK_PRO.md", "README.md", "LICENSE.txt", "do_release.sh")
 
 
@@ -44,8 +44,12 @@ def main():
                 raise RuntimeError(f"ZIP integrity check failed: {failed}")
             if any(name.startswith("tests/") for name in archive.namelist()):
                 raise RuntimeError("release ZIP must not contain tests")
-            for name in ("System/bin/bash", "System/bin/bash.real", "System/bin/setterm", "Emus/PORTS/launch_balanced.sh"):
+            for name in ("System/bin/bash", "System/bin/bash.real", "System/bin/setterm",
+                         "Emus/PORTS/launch_balanced.sh", "Apps/ROMSearch/launch.sh"):
                 assert archive.getinfo(name).external_attr >> 16 & 0o111, name
+            for name in ("Apps/ROMSearch/app.py", "Apps/ROMSearch/rom_sources.py",
+                         "Apps/ROMSearch/config.json", "Apps/ROMSearch/icon.png"):
+                archive.getinfo(name)
             count = len(archive.namelist())
         output = ROOT / "TRIMUI_EX.zip"
         os.replace(temporary, output)
