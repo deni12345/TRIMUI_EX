@@ -8,6 +8,8 @@ Downloaded archives are saved to the corresponding existing folder under
 matching PNG under `/mnt/SDCARD/Imgs/<system>/` for the stock menu. Pressing A
 on an already downloaded game can retry a missing thumbnail. Existing ROMs and
 images are not overwritten; archives are not extracted.
+For PGM arcade games, the app copies an existing `pgm.zip` BIOS from
+RetroArch's system directory into `Roms/MAME`, where the MAME core requires it.
 
 Both sources were searched and their small sample ZIP files downloaded to a
 temporary directory on a TG4040 on 2026-09-23. Both samples passed ZIP format

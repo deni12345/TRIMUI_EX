@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 
 
 USER_AGENT = "TrimUI-ROM-Search/0.1"
@@ -177,6 +178,23 @@ def installable(games, rom_root):
     return result
 
 
+def ensure_pgm_bios(game, rom_path):
+    """Put the device's existing PGM BIOS where its MAME core looks for it."""
+    if game.system != "mame" or rom_path.suffix.lower() != ".zip":
+        return
+    try:
+        with zipfile.ZipFile(rom_path) as archive:
+            names = (item.filename.lower() for item in archive.infolist())
+            if not any(name.startswith(("pgm_a", "pgm_b", "pgm_t")) for name in names):
+                return
+    except zipfile.BadZipFile:
+        return
+    bios = rom_path.parent.parent.parent / "RetroArch/.retroarch/system/pgm.zip"
+    destination = rom_path.parent / "pgm.zip"
+    if bios.is_file() and not destination.exists():
+        shutil.copyfile(bios, destination)
+
+
 def download(game, rom_root, progress=None):
     target_dir = destination(rom_root, game)
     if game.source == "CoolROM":
@@ -202,6 +220,7 @@ def download(game, rom_root, progress=None):
         raise SourceError("Unsupported download filename")
     target = target_dir / filename
     if target.exists():
+        ensure_pgm_bios(game, target)
         return target
     partial = target.with_name(target.name + ".partial")
     if partial.exists():
@@ -233,6 +252,7 @@ def download(game, rom_root, progress=None):
         if not total or (length and total != length):
             raise SourceError("Download incomplete")
         os.replace(partial, target)
+        ensure_pgm_bios(game, target)
         return target
     except Exception:
         partial.unlink(missing_ok=True)
