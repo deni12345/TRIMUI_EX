@@ -7,6 +7,11 @@ firmware. It supplies the Bash and runtime setup needed to launch tested ports
 from the stock menu. It also fixes a first-time PortMaster install failure where
 the game's launcher has not yet been copied into `Roms/PORTS`.
 
+The earlier 2048 black-screen-and-exit fault had a specific cause: stock MainUI
+starts games without `SHELL`, and the supplied static Bash crashed on this
+firmware when that variable was missing. Both Bash entry points now set it
+before starting Bash. The first-time installer fix is separate from that crash.
+
 ### Install on a Brick Pro
 
 1. Back up your SD card and internal firmware before changing the device.

@@ -10,6 +10,11 @@ returned to MainUI. It also fixes PortMaster's first-time install error when
 the launcher destination in `Roms/PORTS` does not exist yet. Existing game
 scripts are not rewritten.
 
+The tested 2048 black-screen-and-exit failure was caused by MainUI omitting
+`SHELL`: the static Bash interpreter crashed before the game started. Both Bash
+entry points now initialize `SHELL` before invoking that interpreter. This is
+separate from the newly downloaded launcher fix.
+
 Download `TRIMUI_EX.zip` and follow the Brick Pro instructions in
 [README.md](README.md). Extract the ZIP onto the SD card; do not flash a
 TG3040 or TG5040 firmware image. The release ZIP excludes tests; the source
