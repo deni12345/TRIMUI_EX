@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,35 @@ def new_device_info():
             adapter.transform("pylibs/harbourmaster/hardware.py", "def changed_api(): pass\n", FRAGMENTS)
         with self.assertRaises(ValueError):
             adapter.transform("device_info.txt", "#!/bin/bash\n", FRAGMENTS)
+        with self.assertRaises(ValueError):
+            adapter.transform("pylibs/harbourmaster/platform.py", "class OtherPlatform: pass\n", FRAGMENTS)
+
+    def test_new_port_launcher_is_copied_when_target_does_not_exist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            roms = root / "Roms/PORTS"
+            roms.mkdir(parents=True)
+            script = root / "New Game.sh"
+            script.write_text("#!/bin/sh\necho ready\n")
+            source = f'''class PlatformTrimUI:
+    def add_port_script(self, port_script):
+        ROM_SCRIPT_DIR = Path({str(roms)!r})
+        port_mode = self.hm.cfg_data.get('trimui-port-mode', 'roms')
+        if port_mode == 'roms':
+            target_file = ROM_SCRIPT_DIR / (port_script.name)
+            if not os.path.samefile(port_script, target_file):
+                logger.debug(f"Copying {{port_script}} to {{target_file}}")
+                shutil.copy(port_script, target_file)
+'''
+            patched = adapter.transform("pylibs/harbourmaster/platform.py", source, FRAGMENTS)
+            self.assertEqual(patched, adapter.transform("pylibs/harbourmaster/platform.py", patched, FRAGMENTS))
+            scope = {"Path": Path, "os": os, "shutil": shutil,
+                     "logger": SimpleNamespace(debug=lambda message: None)}
+            exec(patched, scope)
+            platform = scope["PlatformTrimUI"]()
+            platform.hm = SimpleNamespace(cfg_data={})
+            platform.add_port_script(script)
+            self.assertEqual((roms / script.name).read_text(), script.read_text())
 
     def test_shell_patches_are_idempotent_and_parse_as_bash(self):
         for name, source in [("device_info.txt", "#!/bin/bash\n# GLIBC\ntrue\n"),

@@ -23,6 +23,9 @@ controls. Do not flash a TG3040 or TG5040 firmware image onto a TG4040.
   by input helpers, using SDL2 input and without saving over the shared config.
 - Genuine `setterm` supplies the input helper's terminal-control dependency.
 - The TG4040 startup path bypasses legacy updates that replace BusyBox.
+- First-time PortMaster installs copy their launcher into `Roms/PORTS` even when
+  that destination does not exist yet. The affected PortMaster release otherwise
+  raises an exception after downloading the game.
 
 ## Install or update
 
@@ -87,6 +90,11 @@ an empty environment and script shebang execution; device validation must use
 the actual stock menu runner, not just an SSH process with exported configuration.
 They do not establish that every PortMaster game works or validate physical
 buttons, stick calibration, rumble, Bluetooth, suspend/resume, or long play sessions.
+PortMaster clears its `PORTS_cache7.db` after GUI exit so MainUI can rebuild the
+game list. Stock MainUI shows emulator icon counts from these per-system caches;
+an absent or old cache can leave a badge empty or stale until that system is
+opened or **Refresh Roms** is used. This SD integration does not change the
+stock MainUI badge rendering.
 The firmware exposes no ARMHF loader on the tested device; games that require an
 unavailable architecture/runtime still need an appropriate build/runtime.
 
@@ -95,8 +103,9 @@ unavailable architecture/runtime still need an appropriate build/runtime.
 Keep the pre-change SD archive and raw firmware backup outside the device.
 Restore the affected SD files from that archive first, including
 `System/etc/ex_config`, `System/bin/ex_update.sh`, `System/starts/ex_init.sh`,
-`Emus/PORTS/`, and the four adapted PortMaster files (`launch.sh`, `control.txt`,
-`device_info.txt`, `pylibs/harbourmaster/hardware.py`). Remove added compatibility
+`Emus/PORTS/`, and the five adapted PortMaster files (`launch.sh`, `control.txt`,
+`device_info.txt`, `pylibs/harbourmaster/hardware.py`,
+`pylibs/harbourmaster/platform.py`). Remove added compatibility
 files using the deployment manifest, checking for subsequent edits first. This
 prevents the new startup hook from reinstalling the integration.
 
@@ -121,5 +130,6 @@ New Bash and setterm binaries have package/binary hashes and licensing informati
 under `System/share/licenses/`. Exact corresponding source and Debian build
 patches are under `sources/` and included in the release ZIP.
 
-Run `sh do_release.sh` to build and validate `TRIMUI_EX.zip`. Backups, logs and
-Python caches are excluded from the package.
+Run `sh do_release.sh` to build and validate `TRIMUI_EX.zip`. Tests stay in the
+source repository and are not bundled in the release ZIP. Backups, logs and
+Python caches are also excluded.

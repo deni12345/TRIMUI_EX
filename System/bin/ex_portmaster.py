@@ -36,6 +36,23 @@ def transform(relative, original, fragments):
         result = base.rstrip() + "\n\n" + fragments["hardware.py.inc"]
         ast.parse(result)
         return result
+    if relative.endswith("platform.py"):
+        tree = ast.parse(base)
+        trimui = next((node for node in tree.body if isinstance(node, ast.ClassDef)
+                       and node.name == "PlatformTrimUI"), None)
+        if trimui is None or not any(isinstance(node, ast.FunctionDef)
+                                     and node.name == "add_port_script" for node in trimui.body):
+            raise ValueError("unsupported PortMaster TrimUI install interface")
+        old = "target_file = ROM_SCRIPT_DIR / (port_script.name)\n            if not os.path.samefile(port_script, target_file):"
+        fixed = "target_file = ROM_SCRIPT_DIR / (port_script.name)\n            if not target_file.exists() or not os.path.samefile(port_script, target_file):"
+        if base.count(old) == 1 and fixed not in base:
+            result = base.replace(old, fixed)
+        elif base.count(fixed) == 1 and old not in base:
+            result = base
+        else:
+            raise ValueError("unsupported PortMaster TrimUI launcher copy interface")
+        ast.parse(result)
+        return result
     if relative == "device_info.txt":
         # Stock TrimUI lacks lscpu; the model adapter supplies DEVICE_CPU below.
         base = base.replace("DEVICE_CPU=$(lscpu |", "DEVICE_CPU=$(command -v lscpu >/dev/null 2>&1 && lscpu |")
@@ -85,7 +102,8 @@ def main():
     fragments = {p.name: p.read_text() for p in (args.system / "lib/trimui-ex").glob("*.inc")}
     changes = []
     # Validate the entire set before making any writes; refuse unfamiliar layouts.
-    for relative in ("pylibs/harbourmaster/hardware.py", "device_info.txt", "control.txt", "../launch.sh"):
+    for relative in ("pylibs/harbourmaster/hardware.py", "pylibs/harbourmaster/platform.py",
+                     "device_info.txt", "control.txt", "../launch.sh"):
         path = args.portmaster / relative
         original = path.read_text()
         result = transform(relative, original, fragments)

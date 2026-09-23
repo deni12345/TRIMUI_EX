@@ -8,7 +8,7 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-INCLUDE = ("System", "Roms", "Imgs", "Emus", "sources", "tools", "tests",
+INCLUDE = ("System", "Roms", "Imgs", "Emus", "sources", "tools",
            "BRICK_PRO.md", "README.md", "LICENSE.txt", "do_release.sh")
 
 
@@ -42,6 +42,8 @@ def main():
             failed = archive.testzip()
             if failed is not None:
                 raise RuntimeError(f"ZIP integrity check failed: {failed}")
+            if any(name.startswith("tests/") for name in archive.namelist()):
+                raise RuntimeError("release ZIP must not contain tests")
             for name in ("System/bin/bash", "System/bin/bash.real", "System/bin/setterm", "Emus/PORTS/launch_balanced.sh"):
                 assert archive.getinfo(name).external_attr >> 16 & 0o111, name
             count = len(archive.namelist())

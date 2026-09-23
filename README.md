@@ -2,11 +2,41 @@
 
 ## Brick Pro (TG4040)
 
-This branch adds stock-firmware Brick Pro support. See [BRICK_PRO.md](BRICK_PRO.md)
-for installation, tests, limitations and rollback. **Do not follow the legacy
-reflash instructions below on a Brick Pro**: TG3040 and TG5040 firmware images
-are for different hardware. A TG4040 installation preserves the stock kernel,
-BusyBox, SDL and GPU drivers and installs its compatibility layer separately.
+This fork adds PortMaster support for the TrimUI Brick Pro (TG4040) with stock
+firmware. It supplies the Bash and runtime setup needed to launch tested ports
+from the stock menu. It also fixes a first-time PortMaster install failure where
+the game's launcher has not yet been copied into `Roms/PORTS`.
+
+### Install on a Brick Pro
+
+1. Back up your SD card and internal firmware before changing the device.
+2. Download `TRIMUI_EX.zip` from the [Brick Pro releases](https://github.com/deni12345/TRIMUI_EX/releases).
+3. Extract the ZIP **onto the SD card root**, merging its `System`, `Emus`,
+   `Imgs` and `Roms` folders with the existing ones. Keep your games, saves and
+   existing PortMaster installation. Do not place the unopened ZIP on the card.
+4. If PortMaster is not installed yet, put the official
+   [trimui.portmaster.zip](https://github.com/PortsMaster/PortMaster-GUI/releases/latest/download/trimui.portmaster.zip)
+   at the SD card root. Do not extract that ZIP yourself.
+5. Insert the SD card and boot the Brick Pro. The startup hook runs the Brick
+   Pro installer. If updating a device already running this integration, or if
+   you need to run it manually, connect by SSH and run:
+
+   ```sh
+   sh /mnt/SDCARD/System/bin/ex_install_brickpro.sh
+   ```
+
+6. Open PortMaster from Apps, install a ready-to-play port, then launch it from
+   the Games/Ports section. Some ports need their own game data or runtime and
+   are not guaranteed to work.
+
+The tested device used stock firmware 1.1.2 and PortMaster 2026.06.23-0015.
+See [BRICK_PRO.md](BRICK_PRO.md) for validation, limits and rollback. This is
+an SD compatibility layer with a small internal integration. **Do not follow
+the legacy firmware flashing instructions below on a Brick Pro.** TG3040 and
+TG5040 images are for different hardware. The release ZIP does not include
+tests; they remain in the source repository for developers.
+
+## Older Brick and Smart Pro instructions
 
 This is a simple framework that will be used to bootstrap PortMaster. But like everything it has spiraled out of control...
 
