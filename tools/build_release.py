@@ -45,10 +45,12 @@ def main():
             if any(name.startswith("tests/") for name in archive.namelist()):
                 raise RuntimeError("release ZIP must not contain tests")
             for name in ("System/bin/bash", "System/bin/bash.real", "System/bin/setterm",
-                         "Emus/PORTS/launch_balanced.sh", "Apps/ROMSearch/launch.sh"):
+                         "Emus/PORTS/launch_balanced.sh", "Apps/ROMSearch/launch.sh",
+                         "Apps/ROMSearch/bin/7zzs"):
                 assert archive.getinfo(name).external_attr >> 16 & 0o111, name
             for name in ("Apps/ROMSearch/app.py", "Apps/ROMSearch/rom_sources.py",
-                         "Apps/ROMSearch/config.json", "Apps/ROMSearch/icon.png"):
+                         "Apps/ROMSearch/config.json", "Apps/ROMSearch/icon.png",
+                         "Apps/ROMSearch/bin/7zip-LICENSE.txt"):
                 archive.getinfo(name)
             count = len(archive.namelist())
         output = ROOT / "TRIMUI_EX.zip"

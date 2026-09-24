@@ -1,8 +1,10 @@
 """Public-page adapters and conservative ROM file installation."""
 from dataclasses import dataclass
+from functools import lru_cache
 from html.parser import HTMLParser
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import html
+import json
 import os
 import re
 import shutil
@@ -38,6 +40,36 @@ SYSTEM_FOLDERS = {
     "game-boy": "GB", "game-boy-color": "GBC", "game-boy-advance": "GBA",
     "super-nintendo": "SFC",
 }
+
+# Files the installed emulators can open after an archive has been unpacked.
+# Arcade sets are an exception: their ZIP filenames and ROM contents must stay intact.
+PLAYABLE_EXT = {
+    "MD": {".bin", ".gen", ".md", ".smd", ".32x"},
+    "MS": {".sms", ".rom", ".gg", ".sg"}, "GG": {".gg"},
+    "PS": {".bin", ".cue", ".img", ".mdf", ".pbp", ".toc", ".cbn", ".m3u", ".chd"},
+    "PSP": {".iso", ".cso", ".pbp", ".chd"},
+    "SS": {".cue", ".iso", ".chd", ".bin", ".img", ".mds", ".ccd"},
+    "DC": {".gdi", ".cdi", ".chd", ".cue"},
+    "MAME": {".zip"}, "NEOGEO": {".zip"},
+    "CPS1": {".zip"}, "CPS2": {".zip"},
+    "ATARI2600": {".a26", ".bin", ".rom"},
+    "ATARI5200": {".a52", ".bin", ".rom"},
+    "ATARI7800": {".a78", ".bin", ".rom"},
+    "LYNX": {".lnx", ".lyx"}, "NGP": {".ngp", ".ngc"},
+    "SEGACD": {".cue", ".iso", ".chd", ".bin", ".img"},
+    "C64": {".d64", ".t64", ".tap", ".crt", ".prg", ".p00"},
+    "FC": {".nes", ".fds", ".unf", ".unif"},
+    "SFC": {".sfc", ".smc", ".fig", ".gd3", ".gd7", ".dx2", ".bsx", ".swc"},
+    "GBA": {".gba", ".agb", ".gbz"},
+    "GB": {".gb", ".gbc"}, "GBC": {".gbc", ".gb"},
+    "N64": {".n64", ".z64", ".v64"}, "NDS": {".nds"},
+}
+ARCHIVE_EXT = {".zip", ".7z", ".rar"}
+ARCADE_FOLDERS = {"MAME", "NEOGEO", "CPS1", "CPS2"}
+DISC_FOLDERS = {"PS", "SS", "DC", "SEGACD"}
+DISC_DESCRIPTORS = {".cue", ".gdi", ".m3u", ".mds", ".ccd"}
+DISC_COMPANIONS = {".bin", ".img", ".iso", ".raw", ".wav", ".ape", ".flac", ".mp3", ".chd", ".mdf", ".sub"}
+ALLOWED_EXT.update(ext for extensions in PLAYABLE_EXT.values() for ext in extensions)
 
 
 class SourceError(Exception):
@@ -156,13 +188,35 @@ def romsfun_download_url(game):
     return html.unescape(match.group(1))
 
 
+@lru_cache(maxsize=8)
+def configured_rom_folders(sd_root):
+    """Read the actual emulator ROM paths, including PPSSPP's PSP folder."""
+    emu_root = sd_root / "Emus"
+    if not emu_root.is_dir():
+        return None
+    rom_root = (sd_root / "Roms").resolve()
+    folders = set()
+    for config in emu_root.glob("*/config.json"):
+        try:
+            data = json.loads(config.read_text(encoding="utf-8"))
+            path = (config.parent / data["rompath"]).resolve()
+            if path.parent == rom_root:
+                folders.add(path.name)
+        except (OSError, KeyError, ValueError, TypeError):
+            continue
+    return frozenset(folders)
+
+
 def destination(rom_root, game):
     folder = SYSTEM_FOLDERS.get(game.system)
-    if not folder:
+    if not folder or folder not in PLAYABLE_EXT:
         raise SourceError("No emulator folder mapped for %s" % game.system)
     path = Path(rom_root) / folder
     if not path.is_dir():
         raise SourceError("Emulator folder missing: %s" % path)
+    configured = configured_rom_folders(Path(rom_root).parent.resolve())
+    if configured is not None and folder not in configured:
+        raise SourceError("No installed emulator uses %s" % path)
     return path
 
 
@@ -195,7 +249,126 @@ def ensure_pgm_bios(game, rom_path):
         shutil.copyfile(bios, destination)
 
 
-def download(game, rom_root, progress=None):
+def archive_members(archive):
+    archiver = Path(__file__).parent / "bin/7zzs"
+    if not archiver.is_file():
+        raise SourceError("Archive extractor is missing from ROM Search")
+    try:
+        result = subprocess.run([str(archiver), "l", "-slt", str(archive)],
+                                capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired as exc:
+        raise SourceError("Archive listing timed out") from exc
+    if result.returncode or len(result.stdout) > 4_000_000:
+        raise SourceError("Cannot read the downloaded archive")
+    listing = result.stdout.decode("utf-8", "replace").replace("\r\n", "\n")
+    if "\n----------\n" not in listing:
+        raise SourceError("Downloaded file is not a supported archive")
+    members = []
+    total = 0
+    for block in listing.split("\n----------\n", 1)[1].strip().split("\n\n"):
+        fields = dict(line.split(" = ", 1) for line in block.splitlines() if " = " in line)
+        name = fields.get("Path", "")
+        if not name:
+            continue
+        parts = name.replace("\\", "/").split("/")
+        if (name.startswith(("/", "\\", "-")) or "\ufffd" in name
+                or any(part in ("", ".", "..") for part in parts)
+                or ":" in parts[0] or any(char in name for char in '*?"<>|\x00')):
+            raise SourceError("Archive contains an unsafe filename")
+        attributes = fields.get("Attributes", "")
+        if fields.get("Folder") == "+" or attributes.startswith("D "):
+            continue
+        if fields.get("Encrypted") == "+" or " l" in attributes:
+            raise SourceError("Encrypted or linked archive members are unsupported")
+        try:
+            size = int(fields["Size"])
+        except (KeyError, ValueError) as exc:
+            raise SourceError("Archive has an invalid file size") from exc
+        total += size
+        if size < 0 or total > MAX_ROM or len(members) >= 256:
+            raise SourceError("Archive expands beyond the supported limit")
+        basename = parts[-1]
+        if basename.endswith((" ", ".")):
+            raise SourceError("Archive filename is unsupported on this SD card")
+        members.append({"path": name, "name": basename,
+                        "parent": tuple(parts[:-1]),
+                        "suffix": PurePosixPath(basename).suffix.lower(), "size": size})
+    return archiver, members
+
+
+def select_archive_members(members, folder):
+    playable = [item for item in members if item["suffix"] in PLAYABLE_EXT[folder]]
+    if not playable:
+        raise SourceError("Archive contains no playable %s game file" % folder)
+    if folder in DISC_FOLDERS:
+        playlists = [item for item in playable if item["suffix"] == ".m3u"]
+        descriptors = playlists or [item for item in playable if item["suffix"] in DISC_DESCRIPTORS]
+        if descriptors:
+            if len(descriptors) != 1:
+                raise SourceError("Archive has multiple disc launch files")
+            primary = descriptors[0]
+            companions = DISC_COMPANIONS | DISC_DESCRIPTORS
+            selected = [item for item in members if item is primary or
+                        (item["parent"] == primary["parent"] and item["suffix"] in companions)]
+        else:
+            if len(playable) != 1:
+                raise SourceError("Archive has multiple game files")
+            primary, selected = playable[0], playable
+    else:
+        if len(playable) != 1:
+            raise SourceError("Archive has multiple game files")
+        primary, selected = playable[0], playable
+    if len({item["name"].lower() for item in selected}) != len(selected):
+        raise SourceError("Archive has duplicate game filenames")
+    return primary, selected
+
+
+def install_archive(archive, target_dir, folder):
+    archiver, members = archive_members(archive)
+    primary, selected = select_archive_members(members, folder)
+    targets = [target_dir / item["name"] for item in selected]
+    if any(path.exists() for path in targets):
+        raise SourceError("A game file already exists in %s" % folder)
+    with tempfile.TemporaryDirectory(prefix=".rom-search-install-", dir=target_dir) as temporary:
+        staged = []
+        for item in selected:
+            path = Path(temporary) / item["name"]
+            try:
+                with path.open("xb") as output:
+                    result = subprocess.run([str(archiver), "x", "-so", "-bd",
+                                             str(archive), item["path"]],
+                                            stdout=output, stderr=subprocess.PIPE,
+                                            timeout=1800)
+            except subprocess.TimeoutExpired as exc:
+                raise SourceError("Game extraction timed out") from exc
+            if result.returncode or path.stat().st_size != item["size"]:
+                raise SourceError("Game extraction failed or was incomplete")
+            staged.append(path)
+        installed = []
+        try:
+            for source, target in zip(staged, targets):
+                os.replace(source, target)
+                installed.append(target)
+        except OSError:
+            for path in installed:
+                path.unlink(missing_ok=True)
+            raise
+    return target_dir / primary["name"]
+
+
+def existing_playable_for_archive(target, folder):
+    preferred = (".m3u", ".cue", ".gdi", ".mds", ".ccd",
+                 ".iso", ".cso", ".pbp", ".chd")
+    ordered = [ext for ext in preferred if ext in PLAYABLE_EXT[folder]]
+    ordered += sorted(PLAYABLE_EXT[folder] - set(ordered))
+    for extension in ordered:
+        candidate = target.with_suffix(extension)
+        if candidate.is_file() and candidate.stat().st_size:
+            return candidate
+    return None
+
+
+def download(game, rom_root, progress=None, status=None):
     target_dir = destination(rom_root, game)
     if game.source == "CoolROM":
         url = coolrom_download_url(game)
@@ -216,15 +389,33 @@ def download(game, rom_root, progress=None):
         filename = Path(urllib.parse.unquote(match.group(1))).name
     else:
         filename = Path(urllib.parse.unquote(parsed.path.rstrip("/").split("/")[-1])).name
-    if Path(filename).suffix.lower() not in ALLOWED_EXT or filename in ("", ".", ".."):
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_EXT or filename in ("", ".", ".."):
         raise SourceError("Unsupported download filename")
+    folder = target_dir.name
+    if folder in ARCADE_FOLDERS and suffix != ".zip":
+        raise SourceError("This arcade emulator requires a ZIP ROM set")
+    if folder in DISC_FOLDERS and suffix in DISC_DESCRIPTORS:
+        raise SourceError("Disc track files must come together in an archive")
+    if suffix not in ARCHIVE_EXT and suffix not in PLAYABLE_EXT[folder]:
+        raise SourceError("%s cannot open %s files" % (folder, suffix))
     target = target_dir / filename
+    if suffix in ARCHIVE_EXT and folder not in ARCADE_FOLDERS:
+        installed = existing_playable_for_archive(target, folder)
+        if installed:
+            return installed
     if target.exists():
+        if suffix in ARCHIVE_EXT and folder not in ARCADE_FOLDERS:
+            if status:
+                status("Extracting game for %s..." % folder)
+            installed = install_archive(target, target_dir, folder)
+            target.unlink()
+            return installed
         ensure_pgm_bios(game, target)
         return target
     partial = target.with_name(target.name + ".partial")
     if partial.exists():
-        raise SourceError("Partial download already exists: %s" % partial.name)
+        partial.unlink()
     total = 0
     try:
         with urllib.request.urlopen(request(url, referer=game.url), timeout=30) as response:
@@ -251,6 +442,12 @@ def download(game, rom_root, progress=None):
                 os.fsync(output.fileno())
         if not total or (length and total != length):
             raise SourceError("Download incomplete")
+        if suffix in ARCHIVE_EXT and folder not in ARCADE_FOLDERS:
+            if status:
+                status("Extracting game for %s..." % folder)
+            installed = install_archive(partial, target_dir, folder)
+            partial.unlink()
+            return installed
         os.replace(partial, target)
         ensure_pgm_bios(game, target)
         return target

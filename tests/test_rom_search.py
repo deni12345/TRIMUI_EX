@@ -25,24 +25,24 @@ class Response(io.BytesIO):
 
 class DownloadTests(unittest.TestCase):
     def test_both_sources_save_in_matching_existing_folders(self):
-        for source, system, folder, url, resolver in (
+        for source, system, folder, url, resolver, payload, filename in (
             ("CoolROM", "genesis", "MD",
-             "https://dl.coolrom.com/roms/genesis/test.zip/token/123/",
-             "coolrom_download_url"),
+             "https://dl.coolrom.com/roms/genesis/test.md/token/123/",
+             "coolrom_download_url", b"rom", "test.md"),
             ("RomsFun", "mame", "MAME",
              "https://sto1.romsforever.co/archive/test.zip?e=123&s=x",
-             "romsfun_download_url"),
+             "romsfun_download_url", b"PK\x03\x04test", "test.zip"),
         ):
             with self.subTest(source=source), tempfile.TemporaryDirectory() as root:
                 (Path(root) / folder).mkdir()
                 game = rom_sources.Game(source, system, "Test", "https://example.test/page")
                 with patch.object(rom_sources, resolver, return_value=url), \
                      patch.object(rom_sources.urllib.request, "urlopen",
-                                  return_value=Response(url, b"PK\x03\x04test")):
+                                  return_value=Response(url, payload)):
                     saved = rom_sources.download(game, root)
-                self.assertEqual(saved, Path(root) / folder / "test.zip")
-                self.assertEqual(saved.read_bytes(), b"PK\x03\x04test")
-                self.assertFalse((saved.parent / "test.zip.partial").exists())
+                self.assertEqual(saved, Path(root) / folder / filename)
+                self.assertEqual(saved.read_bytes(), payload)
+                self.assertFalse((saved.parent / (saved.name + ".partial")).exists())
 
     def test_html_response_never_replaces_an_existing_rom(self):
         with tempfile.TemporaryDirectory() as root:

@@ -117,7 +117,8 @@ class App:
             self.messages.put(("progress", (done, total)))
 
         def action():
-            path = download(game, ROOT, progress)
+            path = download(game, ROOT, progress,
+                            lambda message: self.messages.put(("status", message)))
             self.messages.put(("status", "Saving thumbnail..."))
             try:
                 artwork = save_thumbnail(game, path, IMG_ROOT)
