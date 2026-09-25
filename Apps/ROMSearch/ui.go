@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"image"
+	"image/png"
 	"log"
 	"os"
 	"path/filepath"
@@ -24,6 +26,9 @@ var sdl struct {
 	SetRenderDrawColor   func(uintptr, uint8, uint8, uint8, uint8) int32
 	RenderClear          func(uintptr) int32
 	RenderPresent        func(uintptr)
+	RenderCopy           func(uintptr, uintptr, *sdlRect, *sdlRect) int32
+	RenderReadPixels     func(uintptr, *sdlRect, uint32, *byte, int32) int32
+	DestroyTexture       func(uintptr)
 	PollEvent            func(*byte) int32
 	Delay                func(uint32)
 	GetError             func() string
@@ -32,7 +37,10 @@ var sdl struct {
 	GameControllerClose  func(uintptr)
 	Box                  func(uintptr, int32, int32, int32, int32, uint8, uint8, uint8, uint8) int32
 	String               func(uintptr, int32, int32, string, uint8, uint8, uint8, uint8) int32
+	LoadTexture          func(uintptr, string) uintptr
 }
+
+type sdlRect struct{ X, Y, W, H int32 }
 
 func bindSDL() error {
 	lib, e := purego.Dlopen("libSDL2-2.0.so.0", purego.RTLD_NOW|purego.RTLD_GLOBAL)
@@ -53,6 +61,9 @@ func bindSDL() error {
 	purego.RegisterLibFunc(&sdl.SetRenderDrawColor, lib, "SDL_SetRenderDrawColor")
 	purego.RegisterLibFunc(&sdl.RenderClear, lib, "SDL_RenderClear")
 	purego.RegisterLibFunc(&sdl.RenderPresent, lib, "SDL_RenderPresent")
+	purego.RegisterLibFunc(&sdl.RenderCopy, lib, "SDL_RenderCopy")
+	purego.RegisterLibFunc(&sdl.RenderReadPixels, lib, "SDL_RenderReadPixels")
+	purego.RegisterLibFunc(&sdl.DestroyTexture, lib, "SDL_DestroyTexture")
 	purego.RegisterLibFunc(&sdl.PollEvent, lib, "SDL_PollEvent")
 	purego.RegisterLibFunc(&sdl.Delay, lib, "SDL_Delay")
 	purego.RegisterLibFunc(&sdl.GetError, lib, "SDL_GetError")
@@ -61,6 +72,11 @@ func bindSDL() error {
 	purego.RegisterLibFunc(&sdl.GameControllerClose, lib, "SDL_GameControllerClose")
 	purego.RegisterLibFunc(&sdl.Box, gfx, "boxRGBA")
 	purego.RegisterLibFunc(&sdl.String, gfx, "stringRGBA")
+	imageLib, e := purego.Dlopen("libSDL2_image-2.0.so.0", purego.RTLD_NOW|purego.RTLD_GLOBAL)
+	if e != nil {
+		return e
+	}
+	purego.RegisterLibFunc(&sdl.LoadTexture, imageLib, "IMG_LoadTexture")
 	return nil
 }
 
@@ -71,7 +87,6 @@ type result struct {
 	id          int
 	key         string
 	games       []Game
-	next        bool
 	path        string
 	err         error
 	done, total int64
@@ -79,14 +94,12 @@ type result struct {
 }
 type catalogPage struct {
 	games []Game
-	next  bool
 }
 type App struct {
 	source           int
-	system           int
+	displaySource    int
 	systems          []System
 	query            string
-	page             int
 	games            []Game
 	selected         int
 	mode             string
@@ -96,11 +109,16 @@ type App struct {
 	browseID         int
 	browseCancel     context.CancelFunc
 	status           string
+	showStatus       bool
 	messages         chan result
 	romRoot, imgRoot string
 	running          bool
-	hasNext          bool
 	cache            map[string]catalogPage
+	coverPending     map[string]bool
+	coverFailed      map[string]bool
+	coverSlots       chan struct{}
+	textures         map[string]uintptr
+	captured         bool
 }
 
 func newApp() *App {
@@ -113,43 +131,46 @@ func newApp() *App {
 	if img == "" {
 		img = "/mnt/SDCARD/Imgs"
 	}
-	a := &App{source: 2, systems: configuredSystems(root), romRoot: root, imgRoot: img, page: 1, mode: "home", messages: make(chan result, 100), cache: make(map[string]catalogPage), running: true}
+	a := &App{source: 2, displaySource: 2, systems: configuredSystems(root), romRoot: root, imgRoot: img, mode: "results", messages: make(chan result, 100), cache: make(map[string]catalogPage), coverPending: make(map[string]bool), coverFailed: make(map[string]bool), coverSlots: make(chan struct{}, 2), textures: make(map[string]uintptr), running: true}
 	log.Printf("startup: emulator scan %s, %d systems", time.Since(started), len(a.systems))
 	if len(a.systems) == 0 {
 		a.status = "No configured emulator ROM folders"
 		return a
 	}
-	a.status = "Choose emulator, then press A to browse"
+	a.games = featuredGames(a.systems)
+	a.cache["RomsGames|"] = catalogPage{games: a.games}
+	a.status = fmt.Sprintf("%d featured games  |  Y search", len(a.games))
 	return a
 }
 func (a *App) browse() {
 	if a.busy || len(a.systems) == 0 {
 		return
 	}
-	source, system, page, query := sources[a.source], a.systems[a.system], a.page, a.query
-	key := fmt.Sprintf("%s|%s|%d|%s", source, system.Folder, page, query)
+	source, query := sources[a.source], a.query
+	key := source + "|" + query
 	if cached, found := a.cache[key]; found {
 		a.games = cached.games
-		a.hasNext = cached.next
+		a.displaySource = a.source
+		a.showStatus = false
 		a.selected = 0
 		a.mode = "results"
-		a.status = fmt.Sprintf("%d games  |  page %d", len(cached.games), page)
+		a.status = fmt.Sprintf("%d games  |  Y search", len(cached.games))
 		return
 	}
 	a.busy = true
 	a.loading = true
 	a.browseID++
-	a.games = nil
 	a.selected = 0
-	a.status = "Loading games... B cancels"
+	a.status = "Loading games... X switches, B cancels"
+	a.showStatus = false
 	ctx, cancel := context.WithCancel(context.Background())
 	a.browseCancel = cancel
 	id := a.browseID
 	go func() {
 		started := time.Now()
-		games, next, e := catalog(ctx, source, system, page, query)
-		log.Printf("catalog: %s/%s page %d in %s, %d games, error=%v", source, system.Folder, page, time.Since(started), len(games), e)
-		a.messages <- result{kind: "browse", id: id, key: key, games: games, next: next, err: e}
+		games, e := catalogMixed(ctx, source, query, a.systems)
+		log.Printf("catalog: %s query %q in %s, %d games, error=%v", source, query, time.Since(started), len(games), e)
+		a.messages <- result{kind: "browse", id: id, key: key, games: games, err: e}
 	}()
 }
 func (a *App) cancelLoading() {
@@ -160,8 +181,9 @@ func (a *App) cancelLoading() {
 	a.browseID++
 	a.busy = false
 	a.loading = false
-	a.mode = "home"
-	a.status = "Browse cancelled; press A to retry"
+	a.mode = "results"
+	a.status = "Loading cancelled"
+	a.showStatus = true
 }
 func (a *App) install() {
 	if a.busy || len(a.games) == 0 {
@@ -197,14 +219,22 @@ func (a *App) poll() bool {
 				a.loading = false
 				a.browseCancel = nil
 				if r.err != nil {
-					a.mode = "home"
-					a.status = r.err.Error()
+					a.status = sources[a.source] + ": " + r.err.Error()
+					a.showStatus = true
 				} else {
-					a.cache[r.key] = catalogPage{games: r.games, next: r.next}
+					a.cache[r.key] = catalogPage{games: r.games}
 					a.mode = "results"
 					a.games = r.games
-					a.hasNext = r.next
-					a.status = fmt.Sprintf("%d games  |  page %d", len(r.games), a.page)
+					a.displaySource = a.source
+					a.showStatus = false
+					a.selected = 0
+					a.status = fmt.Sprintf("%d games  |  Y search", len(r.games))
+				}
+			case "cover":
+				delete(a.coverPending, r.key)
+				if r.err != nil {
+					a.coverFailed[r.key] = true
+					log.Printf("cover: %s: %v", r.key, r.err)
 				}
 			case "progress":
 				if r.total > 0 {
@@ -227,6 +257,51 @@ func (a *App) poll() bool {
 		}
 	}
 }
+func (a *App) ensureCovers() {
+	if a.mode != "results" || len(a.games) == 0 {
+		return
+	}
+	top := (a.selected / 8) * 8
+	for i := top; i < len(a.games) && i < top+8; i++ {
+		game := a.games[i]
+		target := coverPath(game)
+		if target == "" || a.coverPending[target] || a.coverFailed[target] {
+			continue
+		}
+		if info, e := os.Stat(target); e == nil && info.Size() > 0 {
+			continue
+		}
+		a.coverPending[target] = true
+		go func() {
+			a.coverSlots <- struct{}{}
+			_, e := fetchCover(game)
+			<-a.coverSlots
+			a.messages <- result{kind: "cover", key: target, err: e}
+		}()
+	}
+}
+func (a *App) coverTexture(renderer uintptr, game Game) uintptr {
+	target := coverPath(game)
+	if target == "" {
+		return 0
+	}
+	if texture, found := a.textures[target]; found {
+		return texture
+	}
+	if info, e := os.Stat(target); e != nil || info.Size() == 0 {
+		return 0
+	}
+	texture := sdl.LoadTexture(renderer, target)
+	a.textures[target] = texture
+	return texture
+}
+func (a *App) closeTextures() {
+	for _, texture := range a.textures {
+		if texture != 0 {
+			sdl.DestroyTexture(texture)
+		}
+	}
+}
 func (a *App) press(action string) {
 	if action == "quit" {
 		if a.loading {
@@ -240,9 +315,12 @@ func (a *App) press(action string) {
 	}
 	if a.loading {
 		switch action {
-		case "source", "systemPrev", "systemNext", "back", "edit", "left", "right", "up", "down":
+		case "source", "back", "edit", "search":
 			a.cancelLoading()
-		default:
+			if action == "back" {
+				return
+			}
+		case "accept":
 			return
 		}
 	}
@@ -250,36 +328,15 @@ func (a *App) press(action string) {
 	case "source":
 		a.source = (a.source + 1) % len(sources)
 		a.query = ""
-		a.page = 1
-		a.games = nil
-		a.hasNext = false
-		a.mode = "home"
-		a.status = "Press A to browse games"
-	case "systemPrev", "systemNext":
-		if len(a.systems) == 0 {
-			return
-		}
-		step := 1
-		if action == "systemPrev" {
-			step = -1
-		}
-		a.system = (a.system + len(a.systems) + step) % len(a.systems)
-		a.query = ""
-		a.page = 1
-		a.games = nil
-		a.hasNext = false
-		a.mode = "home"
-		a.status = "Press A to browse games"
+		a.selected = 0
+		a.mode = "results"
+		a.browse()
 	case "edit":
 		if a.mode == "keyboard" {
-			if len(a.games) > 0 {
-				a.mode = "results"
-			} else {
-				a.mode = "home"
-			}
+			a.mode = "results"
 		} else {
 			a.mode = "keyboard"
-			a.status = "Type name, START search; B deletes"
+			a.status = "Type a name, then press START"
 		}
 	case "search":
 		if len(strings.TrimSpace(a.query)) < 3 {
@@ -287,7 +344,6 @@ func (a *App) press(action string) {
 			a.status = "Enter at least 3 letters"
 			return
 		}
-		a.page = 1
 		a.mode = "results"
 		a.browse()
 	case "back":
@@ -295,61 +351,58 @@ func (a *App) press(action string) {
 			if len(a.query) > 0 {
 				a.query = a.query[:len(a.query)-1]
 			} else {
-				a.mode = "home"
+				a.mode = "results"
 			}
-		} else if a.mode == "results" {
+		} else if a.query != "" {
 			a.query = ""
-			a.page = 1
-			a.games = nil
-			a.mode = "home"
-			a.status = "Press A to browse games"
+			a.browse()
 		}
 	case "accept":
 		if a.mode == "keyboard" {
 			if len(a.query) < 100 {
 				a.query += strings.ToLower(string(keyboard[a.keyY][a.keyX]))
 			}
-		} else if a.mode == "home" {
-			a.query = ""
-			a.page = 1
-			a.browse()
-		} else {
+		} else if len(a.games) > 0 {
 			a.install()
 		}
 	case "up", "down":
-		step := 1
+		step := 4
 		if action == "up" {
-			step = -1
+			step = -4
 		}
 		if a.mode == "keyboard" {
+			if step < 0 {
+				step = -1
+			} else {
+				step = 1
+			}
 			a.keyY = max(0, min(len(keyboard)-1, a.keyY+step))
 			a.keyX = min(a.keyX, len(keyboard[a.keyY])-1)
-		} else if a.mode == "home" && len(a.systems) > 0 {
-			a.system = (a.system + len(a.systems) + step) % len(a.systems)
-			a.query = ""
-			a.page = 1
-			a.status = "Press A to browse games"
-		} else {
+		} else if len(a.games) > 0 {
 			a.selected = max(0, min(len(a.games)-1, a.selected+step))
+			a.ensureCovers()
 		}
-	case "left", "right":
+	case "left", "right", "pagePrev", "pageNext":
 		step := 1
 		if action == "left" {
 			step = -1
 		}
+		if action == "pagePrev" {
+			step = -8
+		}
+		if action == "pageNext" {
+			step = 8
+		}
 		if a.mode == "keyboard" {
-			a.keyX = max(0, min(len(keyboard[a.keyY])-1, a.keyX+step))
-		}
-		if a.mode == "home" {
-			a.source = (a.source + len(sources) + step) % len(sources)
-			a.status = "Press A to browse games"
-		}
-		if a.mode == "results" {
-			next := a.page + step
-			if next >= 1 && (step < 0 || a.hasNext) {
-				a.page = next
-				a.browse()
+			if step < 0 {
+				step = -1
+			} else {
+				step = 1
 			}
+			a.keyX = max(0, min(len(keyboard[a.keyY])-1, a.keyX+step))
+		} else if len(a.games) > 0 {
+			a.selected = max(0, min(len(a.games)-1, a.selected+step))
+			a.ensureCovers()
 		}
 	}
 }
@@ -371,23 +424,39 @@ func label(r uintptr, x, y int32, value string, c [3]uint8) {
 	}
 	sdl.String(r, x, y, s, c[0], c[1], c[2], 255)
 }
+func shortTitle(title string, limit int) string {
+	runes := []rune(title)
+	if len(runes) <= limit {
+		return title
+	}
+	return string(runes[:limit-1]) + "~"
+}
+func badgeLabel(folder string) string {
+	switch folder {
+	case "ATARI2600":
+		return "A2600"
+	case "ATARI5200":
+		return "A5200"
+	case "ATARI7800":
+		return "A7800"
+	}
+	if len(folder) > 6 {
+		return folder[:6]
+	}
+	return folder
+}
 func (a *App) render(r uintptr) {
 	sdl.SetRenderDrawColor(r, 14, 19, 31, 255)
 	sdl.RenderClear(r)
-	panel(r, 0, 0, 512, 38, [3]uint8{35, 52, 76})
-	label(r, 12, 10, "ROM SEARCH", [3]uint8{120, 214, 255})
-	label(r, 232, 10, "SOURCE: "+strings.ToUpper(sources[a.source]), [3]uint8{230, 235, 245})
-	system := "NONE"
-	if len(a.systems) > 0 {
-		system = a.systems[a.system].Folder
-	}
-	label(r, 12, 46, "EMULATOR: "+system+"  < L / R >", [3]uint8{230, 235, 245})
-	label(r, 12, 64, "SEARCH: "+a.query, [3]uint8{230, 235, 245})
+	panel(r, 0, 0, 512, 43, [3]uint8{35, 52, 76})
+	label(r, 10, 7, "ROM SEARCH", [3]uint8{120, 214, 255})
+	label(r, 246, 7, strings.ToUpper(sources[a.source]), [3]uint8{230, 235, 245})
 	if a.mode == "keyboard" {
-		label(r, 12, 85, "A type  START search  B erase  Y back", [3]uint8{120, 214, 255})
+		label(r, 10, 26, "A TYPE  START SEARCH  B ERASE  Y BACK", [3]uint8{210, 223, 239})
+		label(r, 10, 56, "SEARCH: "+a.query, [3]uint8{230, 235, 245})
 		for y, row := range keyboard {
 			for x := range row {
-				px, py := int32(40+x*54), int32(115+y*35)
+				px, py := int32(40+x*54), int32(100+y*35)
 				color := [3]uint8{42, 55, 75}
 				if x == a.keyX && y == a.keyY {
 					color = [3]uint8{44, 110, 152}
@@ -396,41 +465,65 @@ func (a *App) render(r uintptr) {
 				label(r, px+17, py+10, string(row[x]), [3]uint8{230, 235, 245})
 			}
 		}
-	} else if a.mode == "home" {
-		label(r, 12, 86, "CHOOSE AN EMULATOR", [3]uint8{120, 214, 255})
-		top := max(0, a.system-3)
-		for i := top; i < len(a.systems) && i < top+8; i++ {
-			y := int32(110 + (i-top)*23)
-			if i == a.system {
-				panel(r, 8, y-3, 496, 20, [3]uint8{44, 110, 152})
-			}
-			label(r, 20, y, a.systems[i].Folder, [3]uint8{230, 235, 245})
-		}
-		label(r, 12, 302, "UP/DOWN: emulator   LEFT/RIGHT: source", [3]uint8{155, 175, 195})
-		if a.loading {
-			label(r, 12, 320, "LOADING GAMES...   B CANCEL", [3]uint8{255, 215, 130})
-		} else {
-			label(r, 12, 320, "A BROWSE GAMES    Y SEARCH    X SOURCE", [3]uint8{120, 214, 255})
-		}
 	} else {
-		if a.loading {
-			label(r, 12, 87, "LOADING PAGE...  B CANCEL", [3]uint8{255, 215, 130})
-		} else {
-			label(r, 12, 87, "A install   Y search   X source   <- page ->", [3]uint8{120, 214, 255})
+		a.ensureCovers()
+		totalPages := max(1, (len(a.games)+7)/8)
+		currentPage := a.selected/8 + 1
+		heading := fmt.Sprintf("%d GAMES  PAGE %d/%d  X SOURCE  Y SEARCH", len(a.games), currentPage, totalPages)
+		if a.displaySource != a.source {
+			heading = fmt.Sprintf("%d GAMES FROM %s  PAGE %d/%d", len(a.games), strings.ToUpper(sources[a.displaySource]), currentPage, totalPages)
 		}
-		top := max(0, a.selected-10)
-		for i := top; i < len(a.games) && i < top+10; i++ {
-			y := int32(108 + (i-top)*21)
+		label(r, 10, 26, heading, [3]uint8{210, 223, 239})
+		top := (a.selected / 8) * 8
+		for i := top; i < len(a.games) && i < top+8; i++ {
+			game := a.games[i]
+			column, row := (i-top)%4, (i-top)/4
+			x, y := int32(8+column*125), int32(48+row*151)
+			highlight := [3]uint8{37, 51, 68}
 			if i == a.selected {
-				panel(r, 8, y-3, 496, 19, [3]uint8{44, 110, 152})
+				highlight = [3]uint8{70, 180, 226}
 			}
-			label(r, 12, y, a.games[i].Title, [3]uint8{230, 235, 245})
+			panel(r, x, y, 116, 147, highlight)
+			panel(r, x+2, y+2, 112, 143, [3]uint8{24, 33, 48})
+			panel(r, x+11, y+4, 94, 116, [3]uint8{42, 55, 75})
+			if texture := a.coverTexture(r, game); texture != 0 {
+				dest := sdlRect{x + 11, y + 4, 94, 116}
+				sdl.RenderCopy(r, texture, nil, &dest)
+			} else {
+				label(r, x+26, y+55, "NO ART", [3]uint8{155, 175, 195})
+			}
+			badge := badgeLabel(game.System)
+			badgeWidth := int32(len(badge)*8 + 8)
+			panel(r, x+108-badgeWidth, y+6, badgeWidth, 15, [3]uint8{68, 77, 135})
+			label(r, x+112-badgeWidth, y+9, badge, [3]uint8{242, 244, 255})
+			label(r, x+6, y+126, shortTitle(game.Title, 13), [3]uint8{235, 239, 246})
 		}
-		label(r, 12, 320, fmt.Sprintf("Page %d  |  %d shown", a.page, len(a.games)), [3]uint8{155, 175, 195})
 	}
-	panel(r, 0, 340, 512, 44, [3]uint8{35, 52, 76})
-	label(r, 12, 346, a.status, [3]uint8{255, 215, 130})
-	label(r, 12, 365, "SELECT exit  |  Only download files you may use", [3]uint8{230, 235, 245})
+	panel(r, 0, 351, 512, 33, [3]uint8{35, 52, 76})
+	status := a.status
+	if a.mode == "results" && !a.busy && !a.showStatus && len(a.games) > 0 {
+		selected := a.games[a.selected]
+		status = selected.Title + " [" + selected.System + "]"
+	}
+	label(r, 10, 356, status, [3]uint8{255, 215, 130})
+	label(r, 10, 373, "A INSTALL  L/R PAGE  X SOURCE  Y SEARCH  SELECT EXIT", [3]uint8{210, 223, 239})
+	if path := os.Getenv("ROM_SEARCH_CAPTURE"); path != "" && !a.captured {
+		a.captured = true
+		shot := image.NewRGBA(image.Rect(0, 0, 1024, 768))
+		// ABGR8888 stores RGBA bytes on this little-endian device.
+		if sdl.RenderReadPixels(r, nil, 0x16762004, &shot.Pix[0], int32(shot.Stride)) == 0 {
+			if file, e := os.Create(path); e == nil {
+				if e = png.Encode(file, shot); e != nil {
+					log.Printf("capture: %v", e)
+				}
+				file.Close()
+			} else {
+				log.Printf("capture: %v", e)
+			}
+		} else {
+			log.Printf("capture: %s", sdl.GetError())
+		}
+	}
 	sdl.RenderPresent(r)
 }
 func runUI() error {
@@ -468,6 +561,7 @@ func runUI() error {
 		}
 	}
 	app := newApp()
+	defer app.closeTextures()
 	log.Printf("startup: app ready %s", time.Since(started))
 	var event [64]byte
 	dirty := true
@@ -508,9 +602,9 @@ func runUI() error {
 				case 32:
 					action = "accept"
 				case 113:
-					action = "systemPrev"
+					action = "pagePrev"
 				case 101:
-					action = "systemNext"
+					action = "pageNext"
 				}
 			}
 			if kind == 0x651 {
@@ -528,9 +622,9 @@ func runUI() error {
 				case 7:
 					action = "search"
 				case 9:
-					action = "systemPrev"
+					action = "pagePrev"
 				case 10:
-					action = "systemNext"
+					action = "pageNext"
 				case 11:
 					action = "up"
 				case 12:

@@ -51,6 +51,7 @@ def main():
                 assert archive.getinfo(name).external_attr >> 16 & 0o111, name
             for name in ("Apps/ROMSearch/main.go", "Apps/ROMSearch/catalog.go",
                          "Apps/ROMSearch/install.go", "Apps/ROMSearch/ui.go",
+                         "Apps/ROMSearch/cover.go", "Apps/ROMSearch/featured.json",
                          "Apps/ROMSearch/go.mod", "Apps/ROMSearch/go.sum",
                          "Apps/ROMSearch/config.json", "Apps/ROMSearch/icon.png",
                          "Apps/ROMSearch/bin/7zip-LICENSE.txt",

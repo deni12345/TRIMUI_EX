@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,7 +37,45 @@ var systems = []System{
 	{"C64", "c64", "commodore-64", "commodore-64"}, {"SEGACD", "segacd", "sega-cd", "sega-cd"},
 }
 
-type Game struct{ Source, System, Title, URL string }
+type Game struct{ Source, System, Title, URL, ImageURL string }
+
+//go:embed featured.json
+var featuredJSON []byte
+
+type featuredEntry struct {
+	Slug     string `json:"slug"`
+	Title    string `json:"title"`
+	URL      string `json:"url"`
+	ImageURL string `json:"image_url"`
+}
+
+func folderForSlug(source, siteSlug string, installed []System) string {
+	for _, s := range installed {
+		if slug(s, source) == siteSlug {
+			return s.Folder
+		}
+	}
+	return ""
+}
+
+func featuredGames(installed []System) []Game {
+	var entries []featuredEntry
+	if json.Unmarshal(featuredJSON, &entries) != nil {
+		return nil
+	}
+	result := make([]Game, 0, len(entries))
+	for _, entry := range entries {
+		folder := folderForSlug("RomsGames", entry.Slug, installed)
+		if folder != "" {
+			imageURL := entry.ImageURL
+			if strings.HasPrefix(imageURL, "//") {
+				imageURL = "https:" + imageURL
+			}
+			result = append(result, Game{"RomsGames", folder, entry.Title, entry.URL, imageURL})
+		}
+	}
+	return result
+}
 
 var sources = []string{"CoolROM", "RomsFun", "RomsGames"}
 var client = &http.Client{Transport: &http.Transport{MaxIdleConns: 8, MaxIdleConnsPerHost: 4, IdleConnTimeout: 30 * time.Second, ResponseHeaderTimeout: 25 * time.Second}}
@@ -196,6 +235,132 @@ func links(page string) [][2]string {
 	walk(doc)
 	return result
 }
+
+type card struct{ href, title, image string }
+
+func cards(page string) []card {
+	var result []card
+	doc, e := html.Parse(strings.NewReader(page))
+	if e != nil {
+		return result
+	}
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "a" {
+			href := ""
+			for _, a := range n.Attr {
+				if a.Key == "href" {
+					href = a.Val
+					break
+				}
+			}
+			var title, image string
+			var findImage func(*html.Node)
+			findImage = func(child *html.Node) {
+				if child.Type == html.ElementNode && child.Data == "img" && image == "" {
+					for _, a := range child.Attr {
+						if a.Key == "src" {
+							image = a.Val
+						}
+						if a.Key == "alt" {
+							title = a.Val
+						}
+					}
+				}
+				for c := child.FirstChild; c != nil; c = c.NextSibling {
+					findImage(c)
+				}
+			}
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				findImage(c)
+			}
+			if href != "" && image != "" && title != "" {
+				result = append(result, card{href, title, image})
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return result
+}
+
+func catalogMixed(ctx context.Context, source, query string, installed []System) ([]Game, error) {
+	var raw string
+	switch source {
+	case "CoolROM":
+		raw = "https://coolrom.com/search?q=" + url.QueryEscape(query)
+	case "RomsFun":
+		raw = "https://romsfun.com/?s=" + url.QueryEscape(query)
+	default:
+		raw = "https://www.romsgames.net/search/?q=" + url.QueryEscape(query)
+	}
+	page, e := readPageContext(ctx, raw)
+	if e != nil {
+		return nil, e
+	}
+	if source == "CoolROM" {
+		page = strings.Split(page, "Top 25 Downloaded ROMs")[0]
+	}
+	base, _ := url.Parse(raw)
+	var result []Game
+	seen := make(map[string]bool)
+	add := func(href, title, image string) {
+		u, e := base.Parse(href)
+		if e != nil {
+			return
+		}
+		var match []string
+		switch source {
+		case "CoolROM":
+			if u.Hostname() != "coolrom.com" {
+				return
+			}
+			match = gameCool.FindStringSubmatch(u.Path)
+		case "RomsFun":
+			if u.Hostname() != "romsfun.com" {
+				return
+			}
+			match = gameFun.FindStringSubmatch(u.Path)
+		default:
+			if u.Hostname() != "www.romsgames.net" {
+				return
+			}
+			match = gameGames.FindStringSubmatch(u.Path)
+		}
+		if len(match) < 2 || seen[u.String()] || title == "" {
+			return
+		}
+		folder := folderForSlug(source, match[1], installed)
+		if folder == "" {
+			return
+		}
+		seen[u.String()] = true
+		imageURL := ""
+		if image != "" {
+			if art, e := base.Parse(image); e == nil {
+				imageURL = art.String()
+			}
+		}
+		result = append(result, Game{source, folder, title, u.String(), imageURL})
+	}
+	for _, c := range cards(page) {
+		add(c.href, c.title, c.image)
+	}
+	if source != "RomsGames" {
+		for _, link := range links(page) {
+			add(link[0], link[1], "")
+		}
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no games available from %s", source)
+	}
+	if len(result) > 120 {
+		result = result[:120]
+	}
+	return result, nil
+}
 func catalog(ctx context.Context, source string, s System, page int, query string) ([]Game, bool, error) {
 	raw := pageURL(source, s, page, query)
 	content, e := readPageContext(ctx, raw)
@@ -239,7 +404,7 @@ func catalog(ctx context.Context, source string, s System, page int, query strin
 			continue
 		}
 		seen[u.String()] = true
-		games = append(games, Game{source, s.Folder, link[1], u.String()})
+		games = append(games, Game{source, s.Folder, link[1], u.String(), ""})
 	}
 	if len(games) == 0 {
 		return nil, false, fmt.Errorf("no %s games listed for %s", source, s.Folder)
