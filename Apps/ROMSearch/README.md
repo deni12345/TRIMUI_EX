@@ -1,27 +1,15 @@
 # ROM Search for TrimUI Brick Pro
 
-The app appears under Apps after `Apps/ROMSearch` is copied to the SD card.
-It uses the Python and SDL libraries in TRIMUI_EX. Use the D-pad and A to type,
-Start to search, X to switch sites, and A on a result to download. Select exits.
-Downloads are matched to an emulator's configured ROM folder under
-`/mnt/SDCARD/Roms`. For cartridge and disc systems, the app extracts a playable
-game file from ZIP, 7z, or RAR archives; disc track files are kept together.
-Arcade ZIP sets stay zipped. Archives without a clear playable file are rejected
-instead of appearing as a broken game. The app also fetches the game's image
-and writes a matching PNG under `/mnt/SDCARD/Imgs/<system>/` for the stock
-menu. Pressing A on an already downloaded game can retry a missing thumbnail.
-Existing ROMs and images are not overwritten.
-For PGM arcade games, the app copies an existing `pgm.zip` BIOS from
-RetroArch's system directory into `Roms/MAME`, where the MAME core requires it.
+ROM Search now runs as a Go arm64 executable. It starts with a list of PSP games from RomsGames, so a search is optional. L/R switches installed emulators, X switches CoolROM, RomsFun, and RomsGames, left/right changes catalog pages, and A installs the selected game. Y opens the on-screen keyboard; enter a title and press START to search. SELECT exits. The selected emulator filters every source's results before installation.
 
-Both sources were searched and their small sample ZIP files downloaded to a
-temporary directory on a TG4040 on 2026-09-23. Both samples passed ZIP format
-checks. Controller input and live results were also checked on the device.
-Thumbnail download and PNG conversion passed for one game from each source.
-The game's runtime compatibility with a particular emulator has not been
-verified. These sites may change at any time. The app only supports folder
-mappings in `rom_sources.py` and only downloads files you are permitted to use.
+The app reads each emulator's configured `rompath` and saves games under the matching `Roms/<system>/` folder. Cartridge and disc archives are extracted to playable files, keeping companion disc tracks together. Arcade ZIP sets remain zipped. A matching PNG thumbnail is saved under `Imgs/<system>/`. Unclear or unsupported archive contents are rejected. Existing games are kept.
 
-`bin/7zzs` is the official static Linux arm64 7-Zip 26.03 extractor, distributed
-with its license in `bin/7zip-LICENSE.txt`. The app icon uses the supplied ROM
-Search logo.
+Downloads use four HTTP byte ranges when the source supports them, with a single-stream fallback. When there is room, downloads and extraction stage on the device's internal UDISK storage; finished files are copied once to the SD card. The bundled arm64 7-Zip extractor is used for ZIP, 7z, and RAR.
+
+Build from this directory with:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o romsearch .
+```
+
+The Go UI loads the device's SDL2 and SDL2_gfx libraries at runtime. Source sites can change or block automated requests. RomsGames' current download endpoint sometimes returns HTTP 500; the app reports that error and does not install an invalid file. Only download files you are permitted to use.
