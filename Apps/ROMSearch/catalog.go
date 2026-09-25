@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	azuretls "github.com/Noooste/azuretls-client"
 	"golang.org/x/net/html"
 )
 
@@ -78,6 +80,7 @@ func featuredGames(installed []System) []Game {
 }
 
 var sources = []string{"CoolROM", "RomsFun", "RomsGames"}
+var errBrowserChallenge = errors.New("site requires browser verification")
 var client = &http.Client{Transport: &http.Transport{MaxIdleConns: 8, MaxIdleConnsPerHost: 4, IdleConnTimeout: 30 * time.Second, ResponseHeaderTimeout: 25 * time.Second}}
 var gameCool = regexp.MustCompile(`^/roms/([a-z0-9]+)/[0-9]+/[^/]+\.php$`)
 var gameFun = regexp.MustCompile(`^/roms/([a-z0-9-]+)/[^/]+\.html$`)
@@ -173,12 +176,28 @@ func readPage(raw string) (string, error) {
 	return readPageContext(context.Background(), raw)
 }
 func readPageContext(parent context.Context, raw string) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
+	defer cancel()
+	u, e := url.Parse(raw)
+	if e != nil {
+		return "", e
+	}
+	if u.Hostname() == "romsfun.com" || u.Hostname() == "www.romsfun.com" {
+		// RomsFun challenges Go's default TLS/HTTP2 fingerprint. Its pages are
+		// small; keep downloads on the streaming client below.
+		session := azuretls.NewSessionWithContext(ctx)
+		defer session.Close()
+		session.SetTimeout(25 * time.Second)
+		resp, e := session.Get(raw)
+		if e != nil {
+			return "", e
+		}
+		return checkedPage(u.Hostname(), resp.StatusCode, resp.Body)
+	}
 	req, e := newRequest("GET", raw, "", nil)
 	if e != nil {
 		return "", e
 	}
-	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
-	defer cancel()
 	req = req.WithContext(ctx)
 	resp, e := client.Do(req)
 	if e != nil {
@@ -186,20 +205,33 @@ func readPageContext(parent context.Context, raw string) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("%s returned HTTP %d", resp.Request.URL.Hostname(), resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 16_384))
+		return checkedPage(resp.Request.URL.Hostname(), resp.StatusCode, body)
 	}
 	b, e := io.ReadAll(io.LimitReader(resp.Body, 2_000_001))
 	if e != nil {
 		return "", e
 	}
-	if len(b) > 2_000_000 {
+	return checkedPage(resp.Request.URL.Hostname(), resp.StatusCode, b)
+}
+func checkedPage(host string, status int, body []byte) (string, error) {
+	if status != http.StatusOK {
+		if browserChallenge(string(body)) {
+			return "", fmt.Errorf("%w: %s returned HTTP %d", errBrowserChallenge, host, status)
+		}
+		return "", fmt.Errorf("%s returned HTTP %d", host, status)
+	}
+	if len(body) > 2_000_000 {
 		return "", fmt.Errorf("page too large")
 	}
-	page := string(b)
-	if strings.Contains(page, "cf-chl") || strings.Contains(page, "Just a moment...") {
-		return "", fmt.Errorf("site requires a browser challenge")
+	page := string(body)
+	if browserChallenge(page) {
+		return "", errBrowserChallenge
 	}
 	return page, nil
+}
+func browserChallenge(page string) bool {
+	return strings.Contains(page, "cf-chl") || strings.Contains(page, "Just a moment...")
 }
 func links(page string) [][2]string {
 	var result [][2]string

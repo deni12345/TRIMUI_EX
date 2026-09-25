@@ -56,6 +56,8 @@ def main():
                          "Apps/ROMSearch/config.json", "Apps/ROMSearch/icon.png",
                          "Apps/ROMSearch/bin/7zip-LICENSE.txt",
                          "Apps/ROMSearch/bin/purego-LICENSE.txt",
+                         "Apps/ROMSearch/bin/azuretls-LICENSE.txt",
+                         "Apps/ROMSearch/bin/ximage-LICENSE.txt",
                          "Apps/ROMSearch/bin/xnet-LICENSE.txt"):
                 archive.getinfo(name)
             count = len(archive.namelist())

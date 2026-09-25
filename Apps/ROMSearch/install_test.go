@@ -38,3 +38,13 @@ func TestSmallRangeDownloadRequestsWholeFile(t *testing.T) {
 		})
 	}
 }
+
+func TestRomsFunFileLink(t *testing.T) {
+	for _, host := range []string{"sto.romsfast.com", "statics.romsfun.com"} {
+		page := `<a href="https://` + host + `/GBA/Example%20Game.zip?e=123&#038;s=abc" id="download-link">Download</a>`
+		got, name, err := romsFunFileLink(page)
+		if err != nil || got != "https://"+host+"/GBA/Example%20Game.zip?e=123&s=abc" || name != "Example Game.zip" {
+			t.Fatalf("URL %q, name %q, error %v", got, name, err)
+		}
+	}
+}

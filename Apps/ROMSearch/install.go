@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"image"
 	_ "image/jpeg"
 	"image/png"
@@ -22,6 +23,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	azuretls "github.com/Noooste/azuretls-client"
 )
 
 const maxROM int64 = 8 << 30
@@ -75,21 +78,7 @@ func downloadLink(g Game) (string, string, error) {
 		if e != nil {
 			return "", "", e
 		}
-		re = regexp.MustCompile(`<a\s+href="([^"]+)"\s+id="download-link"`)
-		m := re.FindStringSubmatch(second)
-		if len(m) != 2 {
-			return "", "", fmt.Errorf("RomsFun file link missing")
-		}
-		raw := strings.ReplaceAll(m[1], "&amp;", "&")
-		u, e := url.Parse(raw)
-		if e != nil {
-			return "", "", e
-		}
-		if !regexp.MustCompile(`^sto[1-9][0-9]*\.romsforever\.co$`).MatchString(u.Hostname()) {
-			return "", "", fmt.Errorf("unexpected RomsFun host")
-		}
-		name, _ := url.PathUnescape(path.Base(u.Path))
-		return raw, name, nil
+		return romsFunFileLink(second)
 	default:
 		m := regexp.MustCompile(`data-media-id="([0-9]+)"`).FindStringSubmatch(page)
 		if len(m) != 2 {
@@ -130,6 +119,27 @@ func downloadLink(g Game) (string, string, error) {
 		u.RawQuery = q.Encode()
 		return u.String(), name, nil
 	}
+}
+func romsFunFileLink(page string) (string, string, error) {
+	m := regexp.MustCompile(`<a\s+href="([^"]+)"\s+id="download-link"`).FindStringSubmatch(page)
+	if len(m) != 2 {
+		return "", "", fmt.Errorf("RomsFun file link missing")
+	}
+	u, e := url.Parse(html.UnescapeString(m[1]))
+	if e != nil {
+		return "", "", e
+	}
+	if u.Scheme != "https" || !romsFunFileHost(u.Hostname()) {
+		return "", "", fmt.Errorf("unexpected RomsFun host")
+	}
+	name, e := url.PathUnescape(path.Base(u.Path))
+	if e != nil || name == "" {
+		return "", "", fmt.Errorf("RomsFun filename missing")
+	}
+	return u.String(), name, nil
+}
+func romsFunFileHost(host string) bool {
+	return host == "statics.romsfun.com" || regexp.MustCompile(`^sto(?:[1-9][0-9]*)?\.romsfast\.com$`).MatchString(host) || regexp.MustCompile(`^sto[1-9][0-9]*\.romsforever\.co$`).MatchString(host)
 }
 func safeName(name string) bool {
 	return name != "" && name != "." && name != ".." && name == filepath.Base(name) && !strings.HasPrefix(name, "-") && !strings.HasSuffix(name, ".") && !strings.HasSuffix(name, " ") && !strings.ContainsAny(name, "/\\:*?\"<>|\x00")
@@ -182,7 +192,12 @@ func openDownload(raw, referer, rangeHeader string) (*http.Response, error) {
 	if rangeHeader != "" {
 		req.Header.Set("Range", rangeHeader)
 	}
-	resp, e := client.Do(req)
+	var resp *http.Response
+	if romsFunFileHost(req.URL.Hostname()) {
+		resp, e = openRomsFunDownload(req, referer, rangeHeader)
+	} else {
+		resp, e = client.Do(req)
+	}
 	if e != nil {
 		return nil, e
 	}
@@ -196,6 +211,40 @@ func openDownload(raw, referer, rangeHeader string) (*http.Response, error) {
 		return nil, fmt.Errorf("site returned HTML instead of a ROM")
 	}
 	return resp, nil
+}
+
+type browserDownloadBody struct {
+	io.ReadCloser
+	session *azuretls.Session
+}
+
+func (b *browserDownloadBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.session.Close()
+	return err
+}
+func openRomsFunDownload(req *http.Request, referer, rangeHeader string) (*http.Response, error) {
+	session := azuretls.NewSession()
+	session.SetTimeout(30 * time.Second)
+	headers := azuretls.OrderedHeaders{{"Accept", "*/*"}, {"Accept-Encoding", "identity"}}
+	if referer != "" {
+		headers = append(headers, []string{"Referer", referer})
+	}
+	if rangeHeader != "" {
+		headers = append(headers, []string{"Range", rangeHeader})
+	}
+	r, err := session.Do(&azuretls.Request{Method: "GET", Url: req.URL.String(), IgnoreBody: true, OrderedHeaders: headers})
+	if err != nil {
+		session.Close()
+		return nil, err
+	}
+	finalURL, err := url.Parse(r.Url)
+	if err != nil || finalURL.Hostname() != req.URL.Hostname() || r.RawBody == nil {
+		r.CloseBody()
+		session.Close()
+		return nil, fmt.Errorf("RomsFun download redirected or has no body")
+	}
+	return &http.Response{StatusCode: r.StatusCode, Header: http.Header(r.Header), Body: &browserDownloadBody{r.RawBody, session}, ContentLength: r.ContentLength, Request: req}, nil
 }
 func copyStream(dst *os.File, src io.Reader, max int64, progress func(int64, int64), total int64) error {
 	buf := make([]byte, 1024*1024)

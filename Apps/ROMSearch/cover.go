@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	_ "golang.org/x/image/webp"
 )
 
 const coverWidth, coverHeight = 94, 116

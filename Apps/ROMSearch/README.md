@@ -8,6 +8,8 @@ The app reads each emulator's configured `rompath` and saves games under the mat
 
 Downloads use four HTTP byte ranges when the source supports them, with a single-stream fallback. When there is room, downloads and extraction stage on the device's internal UDISK storage; finished files are copied once to the SD card. The bundled arm64 7-Zip extractor is used for ZIP, 7z, and RAR.
 
+RomsFun pages and file links use a browser-compatible Go TLS and HTTP/2 client. The app resolves each signed download link on the device, then streams the file from its approved host. RomsFun WebP covers are converted to PNG for the game grid and installed thumbnail.
+
 Build from this directory with:
 
 ```sh
