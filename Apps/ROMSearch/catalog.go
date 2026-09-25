@@ -45,35 +45,38 @@ var gameFun = regexp.MustCompile(`^/roms/([a-z0-9-]+)/[^/]+\.html$`)
 var gameGames = regexp.MustCompile(`^/([a-z0-9-]+)-rom-[a-z0-9-]+/$`)
 
 func configuredSystems(romRoot string) []System {
+	romRootAbs, e := filepath.Abs(romRoot)
+	if e != nil {
+		return nil
+	}
+	configs, _ := filepath.Glob(filepath.Join(filepath.Dir(romRoot), "Emus", "*", "config.json"))
+	configured := make(map[string]bool, len(configs))
+	for _, c := range configs {
+		data, e := os.ReadFile(c)
+		if e != nil {
+			continue
+		}
+		var v struct {
+			Rompath string `json:"rompath"`
+		}
+		if json.Unmarshal(data, &v) != nil || v.Rompath == "" {
+			continue
+		}
+		p, e := filepath.Abs(filepath.Join(filepath.Dir(c), v.Rompath))
+		if e != nil {
+			continue
+		}
+		relative, e := filepath.Rel(romRootAbs, p)
+		if e == nil && relative != "." && relative != ".." && !strings.ContainsRune(relative, os.PathSeparator) {
+			configured[relative] = true
+		}
+	}
 	var result []System
 	for _, s := range systems {
 		if st, e := os.Stat(filepath.Join(romRoot, s.Folder)); e != nil || !st.IsDir() {
 			continue
 		}
-		found := false
-		configs, _ := filepath.Glob(filepath.Join(filepath.Dir(romRoot), "Emus", "*", "config.json"))
-		if len(configs) == 0 {
-			found = true
-		}
-		for _, c := range configs {
-			data, e := os.ReadFile(c)
-			if e != nil {
-				continue
-			}
-			var v struct {
-				Rompath string `json:"rompath"`
-			}
-			if json.Unmarshal(data, &v) != nil || v.Rompath == "" {
-				continue
-			}
-			p, _ := filepath.Abs(filepath.Join(filepath.Dir(c), v.Rompath))
-			expected, _ := filepath.Abs(filepath.Join(romRoot, s.Folder))
-			if p == expected {
-				found = true
-				break
-			}
-		}
-		if found {
+		if len(configs) == 0 || configured[s.Folder] {
 			result = append(result, s)
 		}
 	}

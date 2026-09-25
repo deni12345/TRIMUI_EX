@@ -9,7 +9,7 @@ Downloads use four HTTP byte ranges when the source supports them, with a single
 Build from this directory with:
 
 ```sh
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o romsearch .
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o romsearch .
 ```
 
 The Go UI loads the device's SDL2 and SDL2_gfx libraries at runtime. Source sites can change or block automated requests. RomsGames' current download endpoint sometimes returns HTTP 500; the app reports that error and does not install an invalid file. Only download files you are permitted to use.

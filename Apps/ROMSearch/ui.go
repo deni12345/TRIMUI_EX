@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ebitengine/purego"
 )
@@ -91,6 +93,7 @@ type App struct {
 }
 
 func newApp() *App {
+	started := time.Now()
 	root := os.Getenv("ROM_SEARCH_ROOT")
 	if root == "" {
 		root = "/mnt/SDCARD/Roms"
@@ -100,6 +103,7 @@ func newApp() *App {
 		img = "/mnt/SDCARD/Imgs"
 	}
 	a := &App{source: 2, systems: configuredSystems(root), romRoot: root, imgRoot: img, page: 1, mode: "results", messages: make(chan result, 100), running: true}
+	log.Printf("startup: emulator scan %s, %d systems", time.Since(started), len(a.systems))
 	if len(a.systems) == 0 {
 		a.status = "No configured emulator ROM folders"
 		return a
@@ -117,7 +121,9 @@ func (a *App) browse() {
 	a.status = "Loading " + sources[a.source] + " / " + a.systems[a.system].Folder + "..."
 	source, system, page, query := sources[a.source], a.systems[a.system], a.page, a.query
 	go func() {
+		started := time.Now()
 		games, next, e := catalog(source, system, page, query)
+		log.Printf("catalog: %s/%s page %d in %s, %d games, error=%v", source, system.Folder, page, time.Since(started), len(games), e)
 		a.messages <- result{kind: "browse", games: games, next: next, err: e}
 	}()
 }
@@ -140,10 +146,12 @@ func (a *App) install() {
 		a.messages <- result{kind: "installed", path: p, err: e}
 	}()
 }
-func (a *App) poll() {
+func (a *App) poll() bool {
+	changed := false
 	for {
 		select {
 		case r := <-a.messages:
+			changed = true
 			switch r.kind {
 			case "browse":
 				a.busy = false
@@ -171,7 +179,7 @@ func (a *App) poll() {
 				}
 			}
 		default:
-			return
+			return changed
 		}
 	}
 }
@@ -328,18 +336,22 @@ func (a *App) render(r uintptr) {
 	sdl.RenderPresent(r)
 }
 func runUI() error {
+	started := time.Now()
 	if e := bindSDL(); e != nil {
 		return e
 	}
+	log.Printf("startup: SDL bindings %s", time.Since(started))
 	if sdl.Init(0x2220) != 0 {
 		return fmt.Errorf("SDL init: %s", sdl.GetError())
 	}
 	defer sdl.Quit()
+	log.Printf("startup: SDL initialized %s", time.Since(started))
 	window := sdl.CreateWindow("ROM Search", 0x2FFF0000, 0x2FFF0000, 1024, 768, 0x4)
 	if window == 0 {
 		return fmt.Errorf("SDL window: %s", sdl.GetError())
 	}
 	defer sdl.DestroyWindow(window)
+	log.Printf("startup: window created %s", time.Since(started))
 	renderer := sdl.CreateRenderer(window, -1, 0x2)
 	if renderer == 0 {
 		renderer = sdl.CreateRenderer(window, -1, 0x1)
@@ -348,6 +360,7 @@ func runUI() error {
 		return fmt.Errorf("SDL renderer: %s", sdl.GetError())
 	}
 	defer sdl.DestroyRenderer(renderer)
+	log.Printf("startup: renderer created %s", time.Since(started))
 	sdl.RenderSetLogicalSize(renderer, 512, 384)
 	var controller uintptr
 	if sdl.NumJoysticks() > 0 {
@@ -357,12 +370,19 @@ func runUI() error {
 		}
 	}
 	app := newApp()
+	log.Printf("startup: app ready %s", time.Since(started))
 	var event [64]byte
+	dirty := true
 	for app.running {
-		app.poll()
+		if app.poll() {
+			dirty = true
+		}
 		for sdl.PollEvent(&event[0]) != 0 {
 			kind := binary.LittleEndian.Uint32(event[:4])
 			action := ""
+			if kind == 0x200 {
+				dirty = true
+			}
 			if kind == 0x100 {
 				action = "quit"
 			}
@@ -425,9 +445,13 @@ func runUI() error {
 			}
 			if action != "" {
 				app.press(action)
+				dirty = true
 			}
 		}
-		app.render(renderer)
+		if dirty {
+			app.render(renderer)
+			dirty = false
+		}
 		sdl.Delay(30)
 	}
 	return nil
