@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -243,6 +244,8 @@ func (a *App) poll() bool {
 				if r.err != nil {
 					a.coverFailed[r.key] = true
 					log.Printf("cover: %s: %v", r.key, r.err)
+				} else {
+					a.preloadPage = -1
 				}
 			case "progress":
 				if r.total > 0 {
@@ -289,20 +292,27 @@ func (a *App) ensureCovers() {
 		}()
 	}
 }
-func (a *App) coverTexture(renderer uintptr, game Game) uintptr {
+func (a *App) coverTexture(game Game) uintptr {
 	target := coverPath(game)
 	if target == "" {
 		return 0
 	}
-	if texture, found := a.textures[target]; found {
-		return texture
+	return a.textures[target]
+}
+func (a *App) preloadTexture(renderer uintptr, game Game) bool {
+	target := coverPath(game)
+	if target == "" {
+		return false
+	}
+	if _, found := a.textures[target]; found {
+		return false
 	}
 	if info, e := os.Stat(target); e != nil || info.Size() == 0 {
-		return 0
+		return false
 	}
 	texture := sdl.LoadTexture(renderer, target)
 	a.textures[target] = texture
-	return texture
+	return texture != 0
 }
 func (a *App) closeTextures() {
 	for _, texture := range a.textures {
@@ -311,19 +321,21 @@ func (a *App) closeTextures() {
 		}
 	}
 }
-func (a *App) preloadNearby(renderer uintptr) {
+func (a *App) preloadNearby(renderer uintptr) bool {
 	if a.mode != "results" || len(a.games) == 0 {
-		return
+		return false
 	}
 	page := a.selected / 8
 	if page != a.preloadPage {
 		a.preloadPage = page
-		a.preloadIndex = (page + 1) * 8
+		a.preloadIndex = page * 8
 	}
 	if a.preloadIndex < len(a.games) && a.preloadIndex < (page+2)*8 {
-		a.coverTexture(renderer, a.games[a.preloadIndex])
+		loaded := a.preloadTexture(renderer, a.games[a.preloadIndex])
 		a.preloadIndex++
+		return loaded
 	}
+	return false
 }
 func (a *App) press(action string) {
 	if action == "quit" {
@@ -518,7 +530,7 @@ func (a *App) render(r uintptr) {
 			panel(r, x, y, 116, 147, highlight)
 			panel(r, x+2, y+2, 112, 143, [3]uint8{24, 33, 48})
 			panel(r, x+11, y+4, 94, 116, [3]uint8{42, 55, 75})
-			if texture := a.coverTexture(r, game); texture != 0 {
+			if texture := a.coverTexture(game); texture != 0 {
 				dest := sdlRect{x + 11, y + 4, 94, 116}
 				sdl.RenderCopy(r, texture, nil, &dest)
 			} else {
@@ -559,6 +571,8 @@ func (a *App) render(r uintptr) {
 	sdl.RenderPresent(r)
 }
 func runUI() error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	started := time.Now()
 	if e := bindSDL(); e != nil {
 		return e
@@ -711,7 +725,11 @@ func runUI() error {
 			dirty = true
 		}
 		if dirty {
+			renderStarted := time.Now()
 			app.render(renderer)
+			if traceInput {
+				log.Printf("render: %s page=%d selected=%d mode=%s", time.Since(renderStarted), app.selected/8+1, app.selected, app.mode)
+			}
 			dirty = false
 		}
 		if sdl.WaitEventTimeout(&event[0], 30) != 0 {
@@ -720,7 +738,9 @@ func runUI() error {
 				handleEvent(&event)
 			}
 		} else {
-			app.preloadNearby(renderer)
+			if app.preloadNearby(renderer) {
+				dirty = true
+			}
 			for axis, direction := range axisDirection {
 				if direction == 0 || time.Now().Before(axisRepeatAt[axis]) {
 					continue
