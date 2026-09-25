@@ -325,11 +325,30 @@ func fetchFile(raw, referer, target string, progress func(int64, int64)) error {
 			return e
 		}
 		defer resp.Body.Close()
+	} else if resp.StatusCode == 206 {
+		// The one-byte size probe is not the file when it is too small to split.
+		resp.Body.Close()
+		resp, e = openDownload(raw, referer, "")
+		if e != nil {
+			return e
+		}
+		defer resp.Body.Close()
 	}
-	if resp.StatusCode != 200 {
+	expected := resp.ContentLength
+	if resp.StatusCode == 206 {
+		m := regexp.MustCompile(`^bytes 0-([0-9]+)/([0-9]+)$`).FindStringSubmatch(resp.Header.Get("Content-Range"))
+		if len(m) != 3 {
+			return fmt.Errorf("download returned an incomplete byte range")
+		}
+		end, _ := strconv.ParseInt(m[1], 10, 64)
+		expected, _ = strconv.ParseInt(m[2], 10, 64)
+		if expected <= 0 || end+1 != expected {
+			return fmt.Errorf("download returned an incomplete byte range")
+		}
+	} else if resp.StatusCode != 200 {
 		return fmt.Errorf("download HTTP %d", resp.StatusCode)
 	}
-	return copyStream(out, resp.Body, maxROM, progress, resp.ContentLength)
+	return copyStream(out, resp.Body, maxROM, progress, expected)
 }
 
 type member struct {

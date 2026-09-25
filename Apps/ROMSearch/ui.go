@@ -32,7 +32,6 @@ var sdl struct {
 	DestroyTexture           func(uintptr)
 	SetHint                  func(string, string) int32
 	PollEvent                func(*byte) int32
-	WaitEventTimeout         func(*byte, int32) int32
 	GetError                 func() string
 	NumJoysticks             func() int32
 	GameControllerOpen       func(int32) uintptr
@@ -69,7 +68,6 @@ func bindSDL() error {
 	purego.RegisterLibFunc(&sdl.DestroyTexture, lib, "SDL_DestroyTexture")
 	purego.RegisterLibFunc(&sdl.SetHint, lib, "SDL_SetHint")
 	purego.RegisterLibFunc(&sdl.PollEvent, lib, "SDL_PollEvent")
-	purego.RegisterLibFunc(&sdl.WaitEventTimeout, lib, "SDL_WaitEventTimeout")
 	purego.RegisterLibFunc(&sdl.GetError, lib, "SDL_GetError")
 	purego.RegisterLibFunc(&sdl.NumJoysticks, lib, "SDL_NumJoysticks")
 	purego.RegisterLibFunc(&sdl.GameControllerOpen, lib, "SDL_GameControllerOpen")
@@ -85,17 +83,38 @@ func bindSDL() error {
 	return nil
 }
 
-var keyboard = []string{"ABCDEFGH", "IJKLMNOP", "QRSTUVWX", "YZ012345", "6789 -_."}
+type keyboardKey struct {
+	label, value string
+	width        int32
+}
+
+func letterKeys(row string) []keyboardKey {
+	keys := make([]keyboardKey, 0, len(row))
+	for _, letter := range row {
+		keys = append(keys, keyboardKey{string(letter), strings.ToLower(string(letter)), 45})
+	}
+	return keys
+}
+
+var letterRows = [][]keyboardKey{
+	letterKeys("QWERTYUIOP"),
+	letterKeys("ASDFGHJKL"),
+	append(append([]keyboardKey{{"SHIFT", "shift", 55}}, letterKeys("ZXCVBNM")...), keyboardKey{"DEL", "delete", 55}),
+	{{"123", "symbols", 55}, {",", ",", 40}, {"SPACE", " ", 250}, {".", ".", 40}, {"GO", "submit", 55}},
+}
+var symbolRows = [][]keyboardKey{
+	letterKeys("1234567890"),
+	letterKeys("@#$%&*()-"),
+	{{"ABC", "symbols", 55}, {"/", "/", 45}, {":", ":", 45}, {";", ";", 45}, {"'", "'", 45}, {"\"", "\"", 45}, {"?", "?", 45}, {"!", "!", 45}, {"DEL", "delete", 55}},
+	{{"ABC", "symbols", 55}, {",", ",", 40}, {"SPACE", " ", 250}, {".", ".", 40}, {"GO", "submit", 55}},
+}
 
 type result struct {
-	kind        string
-	id          int
-	key         string
-	games       []Game
-	path        string
-	err         error
-	done, total int64
-	message     string
+	kind  string
+	id    int
+	key   string
+	games []Game
+	err   error
 }
 type catalogPage struct {
 	games []Game
@@ -109,12 +128,14 @@ type App struct {
 	selected         int
 	mode             string
 	keyX, keyY       int
+	symbols, shift   bool
 	busy             bool
 	loading          bool
 	browseID         int
 	browseCancel     context.CancelFunc
 	status           string
 	showStatus       bool
+	catalogError     bool
 	messages         chan result
 	romRoot, imgRoot string
 	running          bool
@@ -126,6 +147,8 @@ type App struct {
 	captured         bool
 	preloadPage      int
 	preloadIndex     int
+	job              *installJob
+	jobPollAt        time.Time
 }
 
 func newApp() *App {
@@ -138,7 +161,15 @@ func newApp() *App {
 	if img == "" {
 		img = "/mnt/SDCARD/Imgs"
 	}
-	a := &App{source: 2, displaySource: 2, systems: configuredSystems(root), romRoot: root, imgRoot: img, mode: "results", messages: make(chan result, 100), cache: make(map[string]catalogPage), coverPending: make(map[string]bool), coverFailed: make(map[string]bool), coverSlots: make(chan struct{}, 2), textures: make(map[string]uintptr), preloadPage: -1, running: true}
+	a := &App{source: 2, displaySource: 2, systems: configuredSystems(root), romRoot: root, imgRoot: img, mode: "results", shift: true, messages: make(chan result, 100), cache: make(map[string]catalogPage), coverPending: make(map[string]bool), coverFailed: make(map[string]bool), coverSlots: make(chan struct{}, 2), textures: make(map[string]uintptr), preloadPage: -1, running: true}
+	if job, err := readInstallJob(); err == nil {
+		a.job = job
+		if job.State == "done" {
+			a.status, a.showStatus = "Installed "+filepath.Base(job.Path), true
+		} else if job.State == "error" {
+			a.status, a.showStatus = job.Error, true
+		}
+	}
 	log.Printf("startup: emulator scan %s, %d systems", time.Since(started), len(a.systems))
 	if len(a.systems) == 0 {
 		a.status = "No configured emulator ROM folders"
@@ -146,7 +177,9 @@ func newApp() *App {
 	}
 	a.games = featuredGames(a.systems)
 	a.cache["RomsGames|"] = catalogPage{games: a.games}
-	a.status = fmt.Sprintf("%d featured games  |  Y search", len(a.games))
+	if !a.showStatus {
+		a.status = fmt.Sprintf("%d featured games  |  Y search", len(a.games))
+	}
 	return a
 }
 func (a *App) browse() {
@@ -159,6 +192,7 @@ func (a *App) browse() {
 		a.games = cached.games
 		a.displaySource = a.source
 		a.showStatus = false
+		a.catalogError = false
 		a.preloadPage = -1
 		a.selected = 0
 		a.mode = "results"
@@ -168,9 +202,12 @@ func (a *App) browse() {
 	a.busy = true
 	a.loading = true
 	a.browseID++
+	a.games = nil
 	a.selected = 0
+	a.preloadPage = -1
 	a.status = "Loading games... X switches, B cancels"
 	a.showStatus = false
+	a.catalogError = false
 	ctx, cancel := context.WithCancel(context.Background())
 	a.browseCancel = cancel
 	id := a.browseID
@@ -179,6 +216,7 @@ func (a *App) browse() {
 		games, e := catalogMixed(ctx, source, query, a.systems)
 		log.Printf("catalog: %s query %q in %s, %d games, error=%v", source, query, time.Since(started), len(games), e)
 		a.messages <- result{kind: "browse", id: id, key: key, games: games, err: e}
+		log.Printf("catalog queued: id=%d source=%s", id, source)
 	}()
 }
 func (a *App) cancelLoading() {
@@ -192,25 +230,19 @@ func (a *App) cancelLoading() {
 	a.mode = "results"
 	a.status = "Loading cancelled"
 	a.showStatus = true
+	a.catalogError = false
 }
 func (a *App) install() {
-	if a.busy || len(a.games) == 0 {
+	if a.loading || len(a.games) == 0 {
 		return
 	}
-	game := a.games[a.selected]
-	a.busy = true
-	a.status = "Downloading " + game.Title + "..."
-	go func() {
-		progress := func(done, total int64) {
-			select {
-			case a.messages <- result{kind: "progress", done: done, total: total}:
-			default:
-			}
-		}
-		status := func(s string) { a.messages <- result{kind: "status", message: s} }
-		p, e := install(game, a.romRoot, a.imgRoot, progress, status)
-		a.messages <- result{kind: "installed", path: p, err: e}
-	}()
+	job, err := startInstallJob(a.games[a.selected], a.romRoot, a.imgRoot)
+	if err != nil {
+		a.status, a.showStatus = err.Error(), true
+		return
+	}
+	a.job = job
+	a.status, a.showStatus = "Download started; browse or exit freely", true
 }
 func (a *App) poll() bool {
 	changed := false
@@ -220,6 +252,7 @@ func (a *App) poll() bool {
 			changed = true
 			switch r.kind {
 			case "browse":
+				log.Printf("catalog received: id=%d current=%d error=%v", r.id, a.browseID, r.err)
 				if r.id != a.browseID {
 					continue
 				}
@@ -229,12 +262,14 @@ func (a *App) poll() bool {
 				if r.err != nil {
 					a.status = sources[a.source] + ": " + r.err.Error()
 					a.showStatus = true
+					a.catalogError = true
 				} else {
 					a.cache[r.key] = catalogPage{games: r.games}
 					a.mode = "results"
 					a.games = r.games
 					a.displaySource = a.source
 					a.showStatus = false
+					a.catalogError = false
 					a.preloadPage = -1
 					a.selected = 0
 					a.status = fmt.Sprintf("%d games  |  Y search", len(r.games))
@@ -247,24 +282,27 @@ func (a *App) poll() bool {
 				} else {
 					a.preloadPage = -1
 				}
-			case "progress":
-				if r.total > 0 {
-					a.status = fmt.Sprintf("Downloading %d / %d MiB", r.done>>20, r.total>>20)
-				} else {
-					a.status = fmt.Sprintf("Downloading %d MiB", r.done>>20)
-				}
-			case "status":
-				a.status = r.message
-			case "installed":
-				a.busy = false
-				log.Printf("install: path=%q error=%v", r.path, r.err)
-				if r.err != nil {
-					a.status = r.err.Error()
-				} else {
-					a.status = "Installed " + filepath.Base(r.path)
-				}
 			}
 		default:
+			if time.Since(a.jobPollAt) >= 250*time.Millisecond {
+				a.jobPollAt = time.Now()
+				if job, err := readInstallJob(); err == nil {
+					if (job.State == "queued" || job.State == "running") && !jobActive(job) {
+						job.State, job.Error, job.Stage = "error", "Download stopped unexpectedly", "Download failed"
+						_ = writeInstallJob(job)
+					}
+					if a.job != nil && job.Updated == a.job.Updated {
+						return changed
+					}
+					a.job = job
+					changed = true
+					if job.State == "done" {
+						a.status, a.showStatus = "Installed "+filepath.Base(job.Path), true
+					} else if job.State == "error" {
+						a.status, a.showStatus = job.Error, true
+					}
+				}
+			}
 			return changed
 		}
 	}
@@ -337,15 +375,54 @@ func (a *App) preloadNearby(renderer uintptr) bool {
 	}
 	return false
 }
+func (a *App) keyRows() [][]keyboardKey {
+	if a.symbols {
+		return symbolRows
+	}
+	return letterRows
+}
+func (a *App) typeSelectedKey() {
+	key := a.keyRows()[a.keyY][a.keyX]
+	switch key.value {
+	case "delete":
+		if len(a.query) > 0 {
+			a.query = a.query[:len(a.query)-1]
+		}
+	case "symbols":
+		a.symbols = !a.symbols
+		a.keyX = min(a.keyX, len(a.keyRows()[a.keyY])-1)
+	case "shift":
+		a.shift = !a.shift
+	case "submit":
+		a.press("search")
+	default:
+		if len(a.query) < 100 {
+			value := key.value
+			if a.shift && !a.symbols {
+				value = strings.ToUpper(value)
+				a.shift = false
+			}
+			a.query += value
+		}
+	}
+}
+func (a *App) moveKeyVertical(step int) {
+	oldRows := a.keyRows()
+	oldRow := oldRows[a.keyY]
+	oldX := a.keyX
+	a.keyY = max(0, min(len(oldRows)-1, a.keyY+step))
+	newRow := a.keyRows()[a.keyY]
+	if len(oldRow) > 1 {
+		a.keyX = int(float64(oldX)*float64(len(newRow)-1)/float64(len(oldRow)-1) + 0.5)
+	}
+	a.keyX = max(0, min(len(newRow)-1, a.keyX))
+}
 func (a *App) press(action string) {
 	if action == "quit" {
 		if a.loading {
 			a.cancelLoading()
 		}
 		a.running = false
-		return
-	}
-	if a.busy && !a.loading {
 		return
 	}
 	if a.loading {
@@ -394,9 +471,7 @@ func (a *App) press(action string) {
 		}
 	case "accept":
 		if a.mode == "keyboard" {
-			if len(a.query) < 100 {
-				a.query += strings.ToLower(string(keyboard[a.keyY][a.keyX]))
-			}
+			a.typeSelectedKey()
 		} else if len(a.games) > 0 {
 			a.install()
 		}
@@ -411,8 +486,7 @@ func (a *App) press(action string) {
 			} else {
 				step = 1
 			}
-			a.keyY = max(0, min(len(keyboard)-1, a.keyY+step))
-			a.keyX = min(a.keyX, len(keyboard[a.keyY])-1)
+			a.moveKeyVertical(step)
 		} else if len(a.games) > 0 {
 			a.selected = max(0, min(len(a.games)-1, a.selected+step))
 		}
@@ -433,7 +507,7 @@ func (a *App) press(action string) {
 			} else {
 				step = 1
 			}
-			a.keyX = max(0, min(len(keyboard[a.keyY])-1, a.keyX+step))
+			a.keyX = max(0, min(len(a.keyRows()[a.keyY])-1, a.keyX+step))
 		} else if len(a.games) > 0 {
 			a.selected = max(0, min(len(a.games)-1, a.selected+step))
 		}
@@ -486,7 +560,11 @@ func (a *App) render(r uintptr) {
 	label(r, 224, 7, strings.ToUpper(sources[a.source]), [3]uint8{230, 235, 245})
 	totalPages := max(1, (len(a.games)+7)/8)
 	currentPage := a.selected/8 + 1
-	label(r, 376, 7, fmt.Sprintf("%d GAMES %d/%d", len(a.games), currentPage, totalPages), [3]uint8{210, 223, 239})
+	count := fmt.Sprintf("%d GAMES %d/%d", len(a.games), currentPage, totalPages)
+	if len(a.games) == 0 {
+		count = "0 GAMES"
+	}
+	label(r, 376, 7, count, [3]uint8{210, 223, 239})
 	searchBorder := [3]uint8{75, 94, 118}
 	if a.mode == "keyboard" {
 		searchBorder = [3]uint8{70, 180, 226}
@@ -495,7 +573,7 @@ func (a *App) render(r uintptr) {
 	panel(r, 10, 25, 492, 15, [3]uint8{19, 29, 44})
 	searchText := a.query
 	if searchText == "" {
-		searchText = "Y TO ENTER A GAME NAME"
+		searchText = "GAME TITLE"
 	} else if a.mode == "keyboard" {
 		searchText += "_"
 	}
@@ -504,20 +582,42 @@ func (a *App) render(r uintptr) {
 	}
 	label(r, 15, 29, "SEARCH: "+searchText, [3]uint8{210, 223, 239})
 	if a.mode == "keyboard" {
-		label(r, 10, 56, "A TYPE  START SEARCH  B ERASE  Y BACK", [3]uint8{210, 223, 239})
-		for y, row := range keyboard {
-			for x := range row {
-				px, py := int32(40+x*54), int32(100+y*35)
-				color := [3]uint8{42, 55, 75}
-				if x == a.keyX && y == a.keyY {
-					color = [3]uint8{44, 110, 152}
+		label(r, 10, 55, "A TYPE   B DELETE   START SEARCH   Y CLOSE", [3]uint8{210, 223, 239})
+		panel(r, 0, 85, 512, 260, [3]uint8{193, 198, 207})
+		label(r, 20, 95, "SEARCH GAMES", [3]uint8{53, 60, 70})
+		for y, row := range a.keyRows() {
+			var rowWidth int32
+			for _, key := range row {
+				rowWidth += key.width + 4
+			}
+			rowWidth -= 4
+			px, py := (int32(512)-rowWidth)/2, int32(119+y*54)
+			for x, key := range row {
+				panel(r, px+1, py+3, key.width, 45, [3]uint8{151, 157, 166})
+				color, ink := [3]uint8{250, 251, 252}, [3]uint8{35, 43, 55}
+				if key.value == "shift" || key.value == "delete" || key.value == "symbols" {
+					color = [3]uint8{170, 178, 190}
 				}
-				panel(r, px, py, 42, 28, color)
-				label(r, px+17, py+10, string(row[x]), [3]uint8{230, 235, 245})
+				if x == a.keyX && y == a.keyY {
+					color, ink = [3]uint8{41, 129, 222}, [3]uint8{255, 255, 255}
+				}
+				panel(r, px, py, key.width, 43, color)
+				label(r, px+(key.width-int32(len(key.label)*8))/2, py+17, key.label, ink)
+				px += key.width + 4
 			}
 		}
 	} else {
 		a.ensureCovers()
+		if len(a.games) == 0 {
+			message := "NO GAMES FOUND"
+			if a.loading {
+				message = "LOADING GAMES..."
+			} else if a.catalogError {
+				message = "SOURCE UNAVAILABLE"
+			}
+			label(r, 160, 162, message, [3]uint8{210, 223, 239})
+			label(r, 145, 184, "X NEXT SOURCE  Y SEARCH", [3]uint8{155, 175, 195})
+		}
 		top := (a.selected / 8) * 8
 		for i := top; i < len(a.games) && i < top+8; i++ {
 			game := a.games[i]
@@ -549,8 +649,30 @@ func (a *App) render(r uintptr) {
 		selected := a.games[a.selected]
 		status = selected.Title + " [" + selected.System + "]"
 	}
+	if a.job != nil && (a.job.State == "queued" || a.job.State == "running") {
+		status = a.job.Stage + ": " + a.job.Game.Title
+		if a.job.Total > 0 {
+			status = fmt.Sprintf("%s %d%%: %s", a.job.Stage, min(100, int(a.job.Done*100/a.job.Total)), a.job.Game.Title)
+		} else if a.job.Done > 0 {
+			status = fmt.Sprintf("%s %d MiB: %s", a.job.Stage, a.job.Done>>20, a.job.Game.Title)
+		}
+		panel(r, 10, 366, 492, 5, [3]uint8{19, 29, 44})
+		if a.job.Total > 0 {
+			width := int32(min(int64(492), a.job.Done*492/a.job.Total))
+			if width > 0 {
+				panel(r, 10, 366, width, 5, [3]uint8{70, 180, 226})
+			}
+		} else {
+			offset := int32((a.job.Done >> 16) % 400)
+			panel(r, 10+offset, 366, 92, 5, [3]uint8{70, 180, 226})
+		}
+	}
 	label(r, 10, 356, status, [3]uint8{255, 215, 130})
-	label(r, 10, 373, "A INSTALL  L/R PAGE  X SOURCE  Y SEARCH  SELECT EXIT", [3]uint8{210, 223, 239})
+	footer := "A INSTALL  L/R PAGE  X SOURCE  Y SEARCH  SELECT EXIT"
+	if a.job != nil && (a.job.State == "queued" || a.job.State == "running") {
+		footer = "L/R PAGE  X SOURCE  Y SEARCH  SELECT EXIT (DL RUNS)"
+	}
+	label(r, 10, 373, footer, [3]uint8{210, 223, 239})
 	if path := os.Getenv("ROM_SEARCH_CAPTURE"); path != "" && !a.captured {
 		a.captured = true
 		shot := image.NewRGBA(image.Rect(0, 0, 1024, 768))
@@ -685,13 +807,13 @@ func runUI() error {
 		if kind == 0x651 {
 			switch event[12] {
 			case 0:
-				action = "accept"
-			case 1:
 				action = "back"
+			case 1:
+				action = "accept"
 			case 2:
-				action = "source"
-			case 3:
 				action = "edit"
+			case 3:
+				action = "source"
 			case 4:
 				action = "quit"
 			case 6:
@@ -721,6 +843,14 @@ func runUI() error {
 		}
 	}
 	for app.running {
+		hadEvent := false
+		for sdl.PollEvent(&event[0]) != 0 {
+			hadEvent = true
+			handleEvent(&event)
+		}
+		if !app.running {
+			break
+		}
 		if app.poll() {
 			dirty = true
 		}
@@ -728,16 +858,11 @@ func runUI() error {
 			renderStarted := time.Now()
 			app.render(renderer)
 			if traceInput {
-				log.Printf("render: %s page=%d selected=%d mode=%s", time.Since(renderStarted), app.selected/8+1, app.selected, app.mode)
+				log.Printf("render: %s page=%d selected=%d mode=%s loading=%v catalogError=%v status=%q", time.Since(renderStarted), app.selected/8+1, app.selected, app.mode, app.loading, app.catalogError, app.status)
 			}
 			dirty = false
 		}
-		if sdl.WaitEventTimeout(&event[0], 30) != 0 {
-			handleEvent(&event)
-			for sdl.PollEvent(&event[0]) != 0 {
-				handleEvent(&event)
-			}
-		} else {
+		if !hadEvent {
 			if app.preloadNearby(renderer) {
 				dirty = true
 			}
@@ -759,6 +884,7 @@ func runUI() error {
 				dirty = true
 				axisRepeatAt[axis] = time.Now().Add(140 * time.Millisecond)
 			}
+			time.Sleep(16 * time.Millisecond)
 		}
 	}
 	return nil

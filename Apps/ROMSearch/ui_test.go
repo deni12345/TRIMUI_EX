@@ -34,8 +34,8 @@ func TestMixedFeaturedListIsReadyBeforeNetwork(t *testing.T) {
 		t.Fatalf("featured list does not mix installed systems: %v", seen)
 	}
 	a.press("source")
-	if !a.loading || len(a.games) < 8 {
-		t.Fatal("source switch blocked or cleared the visible grid")
+	if !a.loading || len(a.games) != 0 {
+		t.Fatal("source switch should show loading without games from the previous source")
 	}
 	a.press("source")
 	a.press("source")
