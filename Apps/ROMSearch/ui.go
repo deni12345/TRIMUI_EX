@@ -16,28 +16,30 @@ import (
 )
 
 var sdl struct {
-	Init                 func(uint32) int32
-	Quit                 func()
-	CreateWindow         func(string, int32, int32, int32, int32, uint32) uintptr
-	DestroyWindow        func(uintptr)
-	CreateRenderer       func(uintptr, int32, uint32) uintptr
-	DestroyRenderer      func(uintptr)
-	RenderSetLogicalSize func(uintptr, int32, int32) int32
-	SetRenderDrawColor   func(uintptr, uint8, uint8, uint8, uint8) int32
-	RenderClear          func(uintptr) int32
-	RenderPresent        func(uintptr)
-	RenderCopy           func(uintptr, uintptr, *sdlRect, *sdlRect) int32
-	RenderReadPixels     func(uintptr, *sdlRect, uint32, *byte, int32) int32
-	DestroyTexture       func(uintptr)
-	PollEvent            func(*byte) int32
-	WaitEventTimeout     func(*byte, int32) int32
-	GetError             func() string
-	NumJoysticks         func() int32
-	GameControllerOpen   func(int32) uintptr
-	GameControllerClose  func(uintptr)
-	Box                  func(uintptr, int32, int32, int32, int32, uint8, uint8, uint8, uint8) int32
-	String               func(uintptr, int32, int32, string, uint8, uint8, uint8, uint8) int32
-	LoadTexture          func(uintptr, string) uintptr
+	Init                     func(uint32) int32
+	Quit                     func()
+	CreateWindow             func(string, int32, int32, int32, int32, uint32) uintptr
+	DestroyWindow            func(uintptr)
+	CreateRenderer           func(uintptr, int32, uint32) uintptr
+	DestroyRenderer          func(uintptr)
+	RenderSetLogicalSize     func(uintptr, int32, int32) int32
+	SetRenderDrawColor       func(uintptr, uint8, uint8, uint8, uint8) int32
+	RenderClear              func(uintptr) int32
+	RenderPresent            func(uintptr)
+	RenderCopy               func(uintptr, uintptr, *sdlRect, *sdlRect) int32
+	RenderReadPixels         func(uintptr, *sdlRect, uint32, *byte, int32) int32
+	DestroyTexture           func(uintptr)
+	SetHint                  func(string, string) int32
+	PollEvent                func(*byte) int32
+	WaitEventTimeout         func(*byte, int32) int32
+	GetError                 func() string
+	NumJoysticks             func() int32
+	GameControllerOpen       func(int32) uintptr
+	GameControllerClose      func(uintptr)
+	GameControllerEventState func(int32) int32
+	Box                      func(uintptr, int32, int32, int32, int32, uint8, uint8, uint8, uint8) int32
+	String                   func(uintptr, int32, int32, string, uint8, uint8, uint8, uint8) int32
+	LoadTexture              func(uintptr, string) uintptr
 }
 
 type sdlRect struct{ X, Y, W, H int32 }
@@ -64,12 +66,14 @@ func bindSDL() error {
 	purego.RegisterLibFunc(&sdl.RenderCopy, lib, "SDL_RenderCopy")
 	purego.RegisterLibFunc(&sdl.RenderReadPixels, lib, "SDL_RenderReadPixels")
 	purego.RegisterLibFunc(&sdl.DestroyTexture, lib, "SDL_DestroyTexture")
+	purego.RegisterLibFunc(&sdl.SetHint, lib, "SDL_SetHint")
 	purego.RegisterLibFunc(&sdl.PollEvent, lib, "SDL_PollEvent")
 	purego.RegisterLibFunc(&sdl.WaitEventTimeout, lib, "SDL_WaitEventTimeout")
 	purego.RegisterLibFunc(&sdl.GetError, lib, "SDL_GetError")
 	purego.RegisterLibFunc(&sdl.NumJoysticks, lib, "SDL_NumJoysticks")
 	purego.RegisterLibFunc(&sdl.GameControllerOpen, lib, "SDL_GameControllerOpen")
 	purego.RegisterLibFunc(&sdl.GameControllerClose, lib, "SDL_GameControllerClose")
+	purego.RegisterLibFunc(&sdl.GameControllerEventState, lib, "SDL_GameControllerEventState")
 	purego.RegisterLibFunc(&sdl.Box, gfx, "boxRGBA")
 	purego.RegisterLibFunc(&sdl.String, gfx, "stringRGBA")
 	imageLib, e := purego.Dlopen("libSDL2_image-2.0.so.0", purego.RTLD_NOW|purego.RTLD_GLOBAL)
@@ -250,6 +254,7 @@ func (a *App) poll() bool {
 				a.status = r.message
 			case "installed":
 				a.busy = false
+				log.Printf("install: path=%q error=%v", r.path, r.err)
 				if r.err != nil {
 					a.status = r.err.Error()
 				} else {
@@ -466,10 +471,28 @@ func (a *App) render(r uintptr) {
 	sdl.RenderClear(r)
 	panel(r, 0, 0, 512, 43, [3]uint8{35, 52, 76})
 	label(r, 10, 7, "ROM SEARCH", [3]uint8{120, 214, 255})
-	label(r, 246, 7, strings.ToUpper(sources[a.source]), [3]uint8{230, 235, 245})
+	label(r, 224, 7, strings.ToUpper(sources[a.source]), [3]uint8{230, 235, 245})
+	totalPages := max(1, (len(a.games)+7)/8)
+	currentPage := a.selected/8 + 1
+	label(r, 376, 7, fmt.Sprintf("%d GAMES %d/%d", len(a.games), currentPage, totalPages), [3]uint8{210, 223, 239})
+	searchBorder := [3]uint8{75, 94, 118}
 	if a.mode == "keyboard" {
-		label(r, 10, 26, "A TYPE  START SEARCH  B ERASE  Y BACK", [3]uint8{210, 223, 239})
-		label(r, 10, 56, "SEARCH: "+a.query, [3]uint8{230, 235, 245})
+		searchBorder = [3]uint8{70, 180, 226}
+	}
+	panel(r, 8, 23, 496, 19, searchBorder)
+	panel(r, 10, 25, 492, 15, [3]uint8{19, 29, 44})
+	searchText := a.query
+	if searchText == "" {
+		searchText = "Y TO ENTER A GAME NAME"
+	} else if a.mode == "keyboard" {
+		searchText += "_"
+	}
+	if len(searchText) > 46 {
+		searchText = searchText[len(searchText)-46:]
+	}
+	label(r, 15, 29, "SEARCH: "+searchText, [3]uint8{210, 223, 239})
+	if a.mode == "keyboard" {
+		label(r, 10, 56, "A TYPE  START SEARCH  B ERASE  Y BACK", [3]uint8{210, 223, 239})
 		for y, row := range keyboard {
 			for x := range row {
 				px, py := int32(40+x*54), int32(100+y*35)
@@ -483,13 +506,6 @@ func (a *App) render(r uintptr) {
 		}
 	} else {
 		a.ensureCovers()
-		totalPages := max(1, (len(a.games)+7)/8)
-		currentPage := a.selected/8 + 1
-		heading := fmt.Sprintf("%d GAMES  PAGE %d/%d  X SOURCE  Y SEARCH", len(a.games), currentPage, totalPages)
-		if a.displaySource != a.source {
-			heading = fmt.Sprintf("%d GAMES FROM %s  PAGE %d/%d", len(a.games), strings.ToUpper(sources[a.displaySource]), currentPage, totalPages)
-		}
-		label(r, 10, 26, heading, [3]uint8{210, 223, 239})
 		top := (a.selected / 8) * 8
 		for i := top; i < len(a.games) && i < top+8; i++ {
 			game := a.games[i]
@@ -548,6 +564,9 @@ func runUI() error {
 		return e
 	}
 	log.Printf("startup: SDL bindings %s", time.Since(started))
+	if sdl.SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1") == 0 {
+		return fmt.Errorf("SDL controller background input hint was rejected")
+	}
 	if sdl.Init(0x2220) != 0 {
 		return fmt.Errorf("SDL init: %s", sdl.GetError())
 	}
@@ -569,6 +588,7 @@ func runUI() error {
 	defer sdl.DestroyRenderer(renderer)
 	log.Printf("startup: renderer created %s", time.Since(started))
 	sdl.RenderSetLogicalSize(renderer, 512, 384)
+	sdl.GameControllerEventState(1)
 	var controller uintptr
 	if sdl.NumJoysticks() > 0 {
 		controller = sdl.GameControllerOpen(0)
@@ -576,11 +596,15 @@ func runUI() error {
 			defer sdl.GameControllerClose(controller)
 		}
 	}
+	log.Printf("startup: controllers=%d, open=%v", sdl.NumJoysticks(), controller != 0)
 	app := newApp()
 	defer app.closeTextures()
 	log.Printf("startup: app ready %s", time.Since(started))
 	var event [64]byte
 	dirty := true
+	var axisDirection [2]int
+	var axisRepeatAt [2]time.Time
+	traceInput := os.Getenv("ROM_SEARCH_TRACE_INPUT") == "1"
 	handleEvent := func(event *[64]byte) {
 		kind := binary.LittleEndian.Uint32(event[:4])
 		action := ""
@@ -619,19 +643,44 @@ func runUI() error {
 				action = "pageNext"
 			}
 		}
+		if kind == 0x650 && event[12] < 2 {
+			axis := int(event[12])
+			value := int16(binary.LittleEndian.Uint16(event[16:18]))
+			direction := 0
+			if value < -17000 {
+				direction = -1
+			} else if value > 17000 {
+				direction = 1
+			}
+			if direction != axisDirection[axis] {
+				axisDirection[axis] = direction
+				axisRepeatAt[axis] = time.Now().Add(350 * time.Millisecond)
+				if direction != 0 {
+					if axis == 0 && direction < 0 {
+						action = "left"
+					} else if axis == 0 {
+						action = "right"
+					} else if direction < 0 {
+						action = "up"
+					} else {
+						action = "down"
+					}
+				}
+			}
+		}
 		if kind == 0x651 {
 			switch event[12] {
 			case 0:
-				action = "back"
-			case 1:
 				action = "accept"
+			case 1:
+				action = "back"
 			case 2:
 				action = "source"
 			case 3:
 				action = "edit"
-			case 6:
+			case 4:
 				action = "quit"
-			case 7:
+			case 6:
 				action = "search"
 			case 9:
 				action = "pagePrev"
@@ -650,6 +699,11 @@ func runUI() error {
 		if action != "" {
 			app.press(action)
 			dirty = true
+			if traceInput {
+				log.Printf("input: kind=%#x action=%s selected=%d mode=%s query=%q", kind, action, app.selected, app.mode, app.query)
+			}
+		} else if traceInput && (kind == 0x650 || kind == 0x651 || kind == 0x300) {
+			log.Printf("input: unmapped kind=%#x value=%d", kind, event[12])
 		}
 	}
 	for app.running {
@@ -667,6 +721,24 @@ func runUI() error {
 			}
 		} else {
 			app.preloadNearby(renderer)
+			for axis, direction := range axisDirection {
+				if direction == 0 || time.Now().Before(axisRepeatAt[axis]) {
+					continue
+				}
+				if axis == 0 {
+					if direction < 0 {
+						app.press("left")
+					} else {
+						app.press("right")
+					}
+				} else if direction < 0 {
+					app.press("up")
+				} else {
+					app.press("down")
+				}
+				dirty = true
+				axisRepeatAt[axis] = time.Now().Add(140 * time.Millisecond)
+			}
 		}
 	}
 	return nil
