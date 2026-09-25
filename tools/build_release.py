@@ -15,7 +15,8 @@ INCLUDE = ("System", "Roms", "Imgs", "Emus", "Apps", "sources", "tools",
 def allowed(path):
     relative = path.relative_to(ROOT)
     return not (relative.parts[:2] == ("System", "backups")
-                or "__pycache__" in relative.parts or path.name == ".DS_Store"
+                or "__pycache__" in relative.parts or path.name.endswith("_test.go")
+                or path.name == ".DS_Store"
                 or path.name.startswith("._") or path.suffix in (".pyc", ".log"))
 
 

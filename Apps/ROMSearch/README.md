@@ -1,6 +1,6 @@
 # ROM Search for TrimUI Brick Pro
 
-ROM Search now runs as a Go arm64 executable. It starts with a list of PSP games from RomsGames, so a search is optional. L/R switches installed emulators, X switches CoolROM, RomsFun, and RomsGames, left/right changes catalog pages, and A installs the selected game. Y opens the on-screen keyboard; enter a title and press START to search. SELECT exits. The selected emulator filters every source's results before installation.
+ROM Search runs as a Go arm64 executable. It opens immediately to an emulator and source picker. Up/down or L/R changes the emulator; left/right or X changes CoolROM, RomsFun, and RomsGames. Press A to browse that source's game list. Only then does it contact the website. On a game list, left/right changes pages and A installs the selected game. Y opens the on-screen keyboard; enter a title and press START to search. B returns to the picker or cancels a loading list. SELECT exits. Loaded pages stay cached for instant revisits during that app session.
 
 The app reads each emulator's configured `rompath` and saves games under the matching `Roms/<system>/` folder. Cartridge and disc archives are extracted to playable files, keeping companion disc tracks together. Arcade ZIP sets remain zipped. A matching PNG thumbnail is saved under `Imgs/<system>/`. Unclear or unsupported archive contents are rejected. Existing games are kept.
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -67,12 +68,18 @@ var keyboard = []string{"ABCDEFGH", "IJKLMNOP", "QRSTUVWX", "YZ012345", "6789 -_
 
 type result struct {
 	kind        string
+	id          int
+	key         string
 	games       []Game
 	next        bool
 	path        string
 	err         error
 	done, total int64
 	message     string
+}
+type catalogPage struct {
+	games []Game
+	next  bool
 }
 type App struct {
 	source           int
@@ -85,11 +92,15 @@ type App struct {
 	mode             string
 	keyX, keyY       int
 	busy             bool
+	loading          bool
+	browseID         int
+	browseCancel     context.CancelFunc
 	status           string
 	messages         chan result
 	romRoot, imgRoot string
 	running          bool
 	hasNext          bool
+	cache            map[string]catalogPage
 }
 
 func newApp() *App {
@@ -102,30 +113,55 @@ func newApp() *App {
 	if img == "" {
 		img = "/mnt/SDCARD/Imgs"
 	}
-	a := &App{source: 2, systems: configuredSystems(root), romRoot: root, imgRoot: img, page: 1, mode: "results", messages: make(chan result, 100), running: true}
+	a := &App{source: 2, systems: configuredSystems(root), romRoot: root, imgRoot: img, page: 1, mode: "home", messages: make(chan result, 100), cache: make(map[string]catalogPage), running: true}
 	log.Printf("startup: emulator scan %s, %d systems", time.Since(started), len(a.systems))
 	if len(a.systems) == 0 {
 		a.status = "No configured emulator ROM folders"
 		return a
 	}
-	a.browse()
+	a.status = "Choose emulator, then press A to browse"
 	return a
 }
 func (a *App) browse() {
 	if a.busy || len(a.systems) == 0 {
 		return
 	}
+	source, system, page, query := sources[a.source], a.systems[a.system], a.page, a.query
+	key := fmt.Sprintf("%s|%s|%d|%s", source, system.Folder, page, query)
+	if cached, found := a.cache[key]; found {
+		a.games = cached.games
+		a.hasNext = cached.next
+		a.selected = 0
+		a.mode = "results"
+		a.status = fmt.Sprintf("%d games  |  page %d", len(cached.games), page)
+		return
+	}
 	a.busy = true
+	a.loading = true
+	a.browseID++
 	a.games = nil
 	a.selected = 0
-	a.status = "Loading " + sources[a.source] + " / " + a.systems[a.system].Folder + "..."
-	source, system, page, query := sources[a.source], a.systems[a.system], a.page, a.query
+	a.status = "Loading games... B cancels"
+	ctx, cancel := context.WithCancel(context.Background())
+	a.browseCancel = cancel
+	id := a.browseID
 	go func() {
 		started := time.Now()
-		games, next, e := catalog(source, system, page, query)
+		games, next, e := catalog(ctx, source, system, page, query)
 		log.Printf("catalog: %s/%s page %d in %s, %d games, error=%v", source, system.Folder, page, time.Since(started), len(games), e)
-		a.messages <- result{kind: "browse", games: games, next: next, err: e}
+		a.messages <- result{kind: "browse", id: id, key: key, games: games, next: next, err: e}
 	}()
+}
+func (a *App) cancelLoading() {
+	if a.browseCancel != nil {
+		a.browseCancel()
+		a.browseCancel = nil
+	}
+	a.browseID++
+	a.busy = false
+	a.loading = false
+	a.mode = "home"
+	a.status = "Browse cancelled; press A to retry"
 }
 func (a *App) install() {
 	if a.busy || len(a.games) == 0 {
@@ -154,10 +190,18 @@ func (a *App) poll() bool {
 			changed = true
 			switch r.kind {
 			case "browse":
+				if r.id != a.browseID {
+					continue
+				}
 				a.busy = false
+				a.loading = false
+				a.browseCancel = nil
 				if r.err != nil {
+					a.mode = "home"
 					a.status = r.err.Error()
 				} else {
+					a.cache[r.key] = catalogPage{games: r.games, next: r.next}
+					a.mode = "results"
 					a.games = r.games
 					a.hasNext = r.next
 					a.status = fmt.Sprintf("%d games  |  page %d", len(r.games), a.page)
@@ -185,19 +229,32 @@ func (a *App) poll() bool {
 }
 func (a *App) press(action string) {
 	if action == "quit" {
+		if a.loading {
+			a.cancelLoading()
+		}
 		a.running = false
 		return
 	}
-	if a.busy {
+	if a.busy && !a.loading {
 		return
+	}
+	if a.loading {
+		switch action {
+		case "source", "systemPrev", "systemNext", "back", "edit", "left", "right", "up", "down":
+			a.cancelLoading()
+		default:
+			return
+		}
 	}
 	switch action {
 	case "source":
 		a.source = (a.source + 1) % len(sources)
 		a.query = ""
 		a.page = 1
-		a.mode = "results"
-		a.browse()
+		a.games = nil
+		a.hasNext = false
+		a.mode = "home"
+		a.status = "Press A to browse games"
 	case "systemPrev", "systemNext":
 		if len(a.systems) == 0 {
 			return
@@ -209,11 +266,17 @@ func (a *App) press(action string) {
 		a.system = (a.system + len(a.systems) + step) % len(a.systems)
 		a.query = ""
 		a.page = 1
-		a.mode = "results"
-		a.browse()
+		a.games = nil
+		a.hasNext = false
+		a.mode = "home"
+		a.status = "Press A to browse games"
 	case "edit":
 		if a.mode == "keyboard" {
-			a.mode = "results"
+			if len(a.games) > 0 {
+				a.mode = "results"
+			} else {
+				a.mode = "home"
+			}
 		} else {
 			a.mode = "keyboard"
 			a.status = "Type name, START search; B deletes"
@@ -232,18 +295,24 @@ func (a *App) press(action string) {
 			if len(a.query) > 0 {
 				a.query = a.query[:len(a.query)-1]
 			} else {
-				a.mode = "results"
+				a.mode = "home"
 			}
-		} else {
+		} else if a.mode == "results" {
 			a.query = ""
 			a.page = 1
-			a.browse()
+			a.games = nil
+			a.mode = "home"
+			a.status = "Press A to browse games"
 		}
 	case "accept":
 		if a.mode == "keyboard" {
 			if len(a.query) < 100 {
 				a.query += strings.ToLower(string(keyboard[a.keyY][a.keyX]))
 			}
+		} else if a.mode == "home" {
+			a.query = ""
+			a.page = 1
+			a.browse()
 		} else {
 			a.install()
 		}
@@ -255,6 +324,11 @@ func (a *App) press(action string) {
 		if a.mode == "keyboard" {
 			a.keyY = max(0, min(len(keyboard)-1, a.keyY+step))
 			a.keyX = min(a.keyX, len(keyboard[a.keyY])-1)
+		} else if a.mode == "home" && len(a.systems) > 0 {
+			a.system = (a.system + len(a.systems) + step) % len(a.systems)
+			a.query = ""
+			a.page = 1
+			a.status = "Press A to browse games"
 		} else {
 			a.selected = max(0, min(len(a.games)-1, a.selected+step))
 		}
@@ -265,6 +339,10 @@ func (a *App) press(action string) {
 		}
 		if a.mode == "keyboard" {
 			a.keyX = max(0, min(len(keyboard[a.keyY])-1, a.keyX+step))
+		}
+		if a.mode == "home" {
+			a.source = (a.source + len(sources) + step) % len(sources)
+			a.status = "Press A to browse games"
 		}
 		if a.mode == "results" {
 			next := a.page + step
@@ -306,7 +384,7 @@ func (a *App) render(r uintptr) {
 	label(r, 12, 46, "EMULATOR: "+system+"  < L / R >", [3]uint8{230, 235, 245})
 	label(r, 12, 64, "SEARCH: "+a.query, [3]uint8{230, 235, 245})
 	if a.mode == "keyboard" {
-		label(r, 12, 85, "A type  START search  B erase  Y list", [3]uint8{120, 214, 255})
+		label(r, 12, 85, "A type  START search  B erase  Y back", [3]uint8{120, 214, 255})
 		for y, row := range keyboard {
 			for x := range row {
 				px, py := int32(40+x*54), int32(115+y*35)
@@ -318,8 +396,28 @@ func (a *App) render(r uintptr) {
 				label(r, px+17, py+10, string(row[x]), [3]uint8{230, 235, 245})
 			}
 		}
+	} else if a.mode == "home" {
+		label(r, 12, 86, "CHOOSE AN EMULATOR", [3]uint8{120, 214, 255})
+		top := max(0, a.system-3)
+		for i := top; i < len(a.systems) && i < top+8; i++ {
+			y := int32(110 + (i-top)*23)
+			if i == a.system {
+				panel(r, 8, y-3, 496, 20, [3]uint8{44, 110, 152})
+			}
+			label(r, 20, y, a.systems[i].Folder, [3]uint8{230, 235, 245})
+		}
+		label(r, 12, 302, "UP/DOWN: emulator   LEFT/RIGHT: source", [3]uint8{155, 175, 195})
+		if a.loading {
+			label(r, 12, 320, "LOADING GAMES...   B CANCEL", [3]uint8{255, 215, 130})
+		} else {
+			label(r, 12, 320, "A BROWSE GAMES    Y SEARCH    X SOURCE", [3]uint8{120, 214, 255})
+		}
 	} else {
-		label(r, 12, 87, "A install   Y search   X source   <- page ->", [3]uint8{120, 214, 255})
+		if a.loading {
+			label(r, 12, 87, "LOADING PAGE...  B CANCEL", [3]uint8{255, 215, 130})
+		} else {
+			label(r, 12, 87, "A install   Y search   X source   <- page ->", [3]uint8{120, 214, 255})
+		}
 		top := max(0, a.selected-10)
 		for i := top; i < len(a.games) && i < top+10; i++ {
 			y := int32(108 + (i-top)*21)

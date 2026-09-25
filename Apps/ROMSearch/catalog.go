@@ -131,11 +131,14 @@ func newRequest(method, raw, referer string, body io.Reader) (*http.Request, err
 	return req, nil
 }
 func readPage(raw string) (string, error) {
+	return readPageContext(context.Background(), raw)
+}
+func readPageContext(parent context.Context, raw string) (string, error) {
 	req, e := newRequest("GET", raw, "", nil)
 	if e != nil {
 		return "", e
 	}
-	ctx, cancel := context.WithTimeout(req.Context(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
 	defer cancel()
 	req = req.WithContext(ctx)
 	resp, e := client.Do(req)
@@ -193,9 +196,9 @@ func links(page string) [][2]string {
 	walk(doc)
 	return result
 }
-func catalog(source string, s System, page int, query string) ([]Game, bool, error) {
+func catalog(ctx context.Context, source string, s System, page int, query string) ([]Game, bool, error) {
 	raw := pageURL(source, s, page, query)
-	content, e := readPage(raw)
+	content, e := readPageContext(ctx, raw)
 	if e != nil {
 		return nil, false, e
 	}
