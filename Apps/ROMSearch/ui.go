@@ -30,7 +30,7 @@ var sdl struct {
 	RenderReadPixels     func(uintptr, *sdlRect, uint32, *byte, int32) int32
 	DestroyTexture       func(uintptr)
 	PollEvent            func(*byte) int32
-	Delay                func(uint32)
+	WaitEventTimeout     func(*byte, int32) int32
 	GetError             func() string
 	NumJoysticks         func() int32
 	GameControllerOpen   func(int32) uintptr
@@ -65,7 +65,7 @@ func bindSDL() error {
 	purego.RegisterLibFunc(&sdl.RenderReadPixels, lib, "SDL_RenderReadPixels")
 	purego.RegisterLibFunc(&sdl.DestroyTexture, lib, "SDL_DestroyTexture")
 	purego.RegisterLibFunc(&sdl.PollEvent, lib, "SDL_PollEvent")
-	purego.RegisterLibFunc(&sdl.Delay, lib, "SDL_Delay")
+	purego.RegisterLibFunc(&sdl.WaitEventTimeout, lib, "SDL_WaitEventTimeout")
 	purego.RegisterLibFunc(&sdl.GetError, lib, "SDL_GetError")
 	purego.RegisterLibFunc(&sdl.NumJoysticks, lib, "SDL_NumJoysticks")
 	purego.RegisterLibFunc(&sdl.GameControllerOpen, lib, "SDL_GameControllerOpen")
@@ -119,6 +119,8 @@ type App struct {
 	coverSlots       chan struct{}
 	textures         map[string]uintptr
 	captured         bool
+	preloadPage      int
+	preloadIndex     int
 }
 
 func newApp() *App {
@@ -131,7 +133,7 @@ func newApp() *App {
 	if img == "" {
 		img = "/mnt/SDCARD/Imgs"
 	}
-	a := &App{source: 2, displaySource: 2, systems: configuredSystems(root), romRoot: root, imgRoot: img, mode: "results", messages: make(chan result, 100), cache: make(map[string]catalogPage), coverPending: make(map[string]bool), coverFailed: make(map[string]bool), coverSlots: make(chan struct{}, 2), textures: make(map[string]uintptr), running: true}
+	a := &App{source: 2, displaySource: 2, systems: configuredSystems(root), romRoot: root, imgRoot: img, mode: "results", messages: make(chan result, 100), cache: make(map[string]catalogPage), coverPending: make(map[string]bool), coverFailed: make(map[string]bool), coverSlots: make(chan struct{}, 2), textures: make(map[string]uintptr), preloadPage: -1, running: true}
 	log.Printf("startup: emulator scan %s, %d systems", time.Since(started), len(a.systems))
 	if len(a.systems) == 0 {
 		a.status = "No configured emulator ROM folders"
@@ -152,6 +154,7 @@ func (a *App) browse() {
 		a.games = cached.games
 		a.displaySource = a.source
 		a.showStatus = false
+		a.preloadPage = -1
 		a.selected = 0
 		a.mode = "results"
 		a.status = fmt.Sprintf("%d games  |  Y search", len(cached.games))
@@ -227,6 +230,7 @@ func (a *App) poll() bool {
 					a.games = r.games
 					a.displaySource = a.source
 					a.showStatus = false
+					a.preloadPage = -1
 					a.selected = 0
 					a.status = fmt.Sprintf("%d games  |  Y search", len(r.games))
 				}
@@ -300,6 +304,20 @@ func (a *App) closeTextures() {
 		if texture != 0 {
 			sdl.DestroyTexture(texture)
 		}
+	}
+}
+func (a *App) preloadNearby(renderer uintptr) {
+	if a.mode != "results" || len(a.games) == 0 {
+		return
+	}
+	page := a.selected / 8
+	if page != a.preloadPage {
+		a.preloadPage = page
+		a.preloadIndex = (page + 1) * 8
+	}
+	if a.preloadIndex < len(a.games) && a.preloadIndex < (page+2)*8 {
+		a.coverTexture(renderer, a.games[a.preloadIndex])
+		a.preloadIndex++
 	}
 }
 func (a *App) press(action string) {
@@ -380,7 +398,6 @@ func (a *App) press(action string) {
 			a.keyX = min(a.keyX, len(keyboard[a.keyY])-1)
 		} else if len(a.games) > 0 {
 			a.selected = max(0, min(len(a.games)-1, a.selected+step))
-			a.ensureCovers()
 		}
 	case "left", "right", "pagePrev", "pageNext":
 		step := 1
@@ -402,7 +419,6 @@ func (a *App) press(action string) {
 			a.keyX = max(0, min(len(keyboard[a.keyY])-1, a.keyX+step))
 		} else if len(a.games) > 0 {
 			a.selected = max(0, min(len(a.games)-1, a.selected+step))
-			a.ensureCovers()
 		}
 	}
 }
@@ -565,86 +581,93 @@ func runUI() error {
 	log.Printf("startup: app ready %s", time.Since(started))
 	var event [64]byte
 	dirty := true
+	handleEvent := func(event *[64]byte) {
+		kind := binary.LittleEndian.Uint32(event[:4])
+		action := ""
+		if kind == 0x200 {
+			dirty = true
+		}
+		if kind == 0x100 {
+			action = "quit"
+		}
+		if kind == 0x300 {
+			key := binary.LittleEndian.Uint32(event[20:24])
+			switch key {
+			case 1073741906:
+				action = "up"
+			case 1073741905:
+				action = "down"
+			case 1073741904:
+				action = "left"
+			case 1073741903:
+				action = "right"
+			case 13:
+				action = "search"
+			case 8:
+				action = "back"
+			case 27:
+				action = "quit"
+			case 120:
+				action = "source"
+			case 121:
+				action = "edit"
+			case 32:
+				action = "accept"
+			case 113:
+				action = "pagePrev"
+			case 101:
+				action = "pageNext"
+			}
+		}
+		if kind == 0x651 {
+			switch event[12] {
+			case 0:
+				action = "back"
+			case 1:
+				action = "accept"
+			case 2:
+				action = "source"
+			case 3:
+				action = "edit"
+			case 6:
+				action = "quit"
+			case 7:
+				action = "search"
+			case 9:
+				action = "pagePrev"
+			case 10:
+				action = "pageNext"
+			case 11:
+				action = "up"
+			case 12:
+				action = "down"
+			case 13:
+				action = "left"
+			case 14:
+				action = "right"
+			}
+		}
+		if action != "" {
+			app.press(action)
+			dirty = true
+		}
+	}
 	for app.running {
 		if app.poll() {
 			dirty = true
-		}
-		for sdl.PollEvent(&event[0]) != 0 {
-			kind := binary.LittleEndian.Uint32(event[:4])
-			action := ""
-			if kind == 0x200 {
-				dirty = true
-			}
-			if kind == 0x100 {
-				action = "quit"
-			}
-			if kind == 0x300 {
-				key := binary.LittleEndian.Uint32(event[20:24])
-				switch key {
-				case 1073741906:
-					action = "up"
-				case 1073741905:
-					action = "down"
-				case 1073741904:
-					action = "left"
-				case 1073741903:
-					action = "right"
-				case 13:
-					action = "search"
-				case 8:
-					action = "back"
-				case 27:
-					action = "quit"
-				case 120:
-					action = "source"
-				case 121:
-					action = "edit"
-				case 32:
-					action = "accept"
-				case 113:
-					action = "pagePrev"
-				case 101:
-					action = "pageNext"
-				}
-			}
-			if kind == 0x651 {
-				switch event[12] {
-				case 0:
-					action = "back"
-				case 1:
-					action = "accept"
-				case 2:
-					action = "source"
-				case 3:
-					action = "edit"
-				case 6:
-					action = "quit"
-				case 7:
-					action = "search"
-				case 9:
-					action = "pagePrev"
-				case 10:
-					action = "pageNext"
-				case 11:
-					action = "up"
-				case 12:
-					action = "down"
-				case 13:
-					action = "left"
-				case 14:
-					action = "right"
-				}
-			}
-			if action != "" {
-				app.press(action)
-				dirty = true
-			}
 		}
 		if dirty {
 			app.render(renderer)
 			dirty = false
 		}
-		sdl.Delay(30)
+		if sdl.WaitEventTimeout(&event[0], 30) != 0 {
+			handleEvent(&event)
+			for sdl.PollEvent(&event[0]) != 0 {
+				handleEvent(&event)
+			}
+		} else {
+			app.preloadNearby(renderer)
+		}
 	}
 	return nil
 }
