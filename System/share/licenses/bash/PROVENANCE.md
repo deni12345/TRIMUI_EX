@@ -12,5 +12,6 @@ which lacks `SHELL`; the internal `/bin/bash` entry point uses the same safeguar
 This is the unmodified `/bin/bash-static` from that package: static AArch64 ELF,
 minimum kernel 3.7.0. It does not replace stock BusyBox or `/bin/sh`.
 The exact upstream source, Debian patches/build rules and `.dsc` are in
-`sources/bash/` at the repository root. Include that directory when distributing
-the binary. Copyright notices and GPLv3 are adjacent to this file.
+`sources/bash/` at the repository root and in the release's
+`TRIMUI_EX-sources.zip` asset. Copyright notices and GPLv3 are adjacent to
+this file.

@@ -160,7 +160,7 @@ func freeBytes(p string) int64 {
 }
 func stageRoot(size int64) string {
 	p := "/mnt/UDISK"
-	if size > 0 && size < 2<<30 && freeBytes(p) > size*3+(200<<20) {
+	if size > 0 && size <= maxROM && freeBytes(p) > size+(200<<20) {
 		return p
 	}
 	return ""
@@ -314,47 +314,52 @@ func fetchFile(raw, referer, target string, progress func(int64, int64)) error {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				r, er := openDownload(raw, referer, fmt.Sprintf("bytes=%d-%d", start, end))
-				if er != nil {
-					errs <- er
-					return
-				}
-				defer r.Body.Close()
-				if r.StatusCode != 206 || !strings.HasPrefix(r.Header.Get("Content-Range"), fmt.Sprintf("bytes %d-%d/", start, end)) {
-					errs <- fmt.Errorf("server did not honor byte range")
-					return
-				}
 				buf := make([]byte, 1024*1024)
 				pos := start
-				for {
-					n, er := r.Body.Read(buf)
-					if n > 0 {
-						if pos+int64(n) > end+1 {
-							errs <- fmt.Errorf("range exceeded")
-							return
-						}
-						if _, w := out.WriteAt(buf[:n], pos); w != nil {
-							errs <- w
-							return
-						}
-						pos += int64(n)
-						mu.Lock()
-						done += int64(n)
-						if progress != nil {
-							progress(done, total)
-						}
-						mu.Unlock()
-					}
-					if er == io.EOF {
-						break
-					}
+				var lastErr error
+				for attempt := 0; attempt < 3 && pos <= end; attempt++ {
+					r, er := openDownload(raw, referer, fmt.Sprintf("bytes=%d-%d", pos, end))
 					if er != nil {
-						errs <- er
+						lastErr = er
+						continue
+					}
+					if r.StatusCode != 206 || !strings.HasPrefix(r.Header.Get("Content-Range"), fmt.Sprintf("bytes %d-%d/", pos, end)) {
+						r.Body.Close()
+						errs <- fmt.Errorf("server did not honor byte range")
 						return
 					}
+					for pos <= end {
+						n, readErr := r.Body.Read(buf)
+						if n > 0 {
+							if pos+int64(n) > end+1 {
+								r.Body.Close()
+								errs <- fmt.Errorf("range exceeded")
+								return
+							}
+							if _, writeErr := out.WriteAt(buf[:n], pos); writeErr != nil {
+								r.Body.Close()
+								errs <- writeErr
+								return
+							}
+							pos += int64(n)
+							mu.Lock()
+							done += int64(n)
+							if progress != nil {
+								progress(done, total)
+							}
+							mu.Unlock()
+						}
+						if readErr != nil {
+							break
+						}
+					}
+					r.Body.Close()
 				}
 				if pos != end+1 {
-					errs <- fmt.Errorf("range incomplete")
+					if lastErr == nil {
+						lastErr = fmt.Errorf("range incomplete")
+					}
+					errs <- lastErr
 				}
 			}()
 		}
@@ -539,11 +544,10 @@ func installArchive(archive, targetDir, folder string) (string, error) {
 	for _, m := range selected {
 		expanded += m.Size
 	}
-	extractBase := filepath.Dir(archive)
-	if freeBytes(extractBase) < expanded+(100<<20) {
-		extractBase = targetDir
+	if freeBytes(targetDir) < expanded+(100<<20) {
+		return "", fmt.Errorf("not enough space for extracted game")
 	}
-	stage, e := os.MkdirTemp(extractBase, "romsearch-extract-")
+	stage, e := os.MkdirTemp(targetDir, ".romsearch-extract-")
 	if e != nil {
 		return "", e
 	}
@@ -567,11 +571,7 @@ func installArchive(archive, targetDir, folder string) (string, error) {
 		if e != nil || !info.Mode().IsRegular() || info.Size() != m.Size {
 			return "", fmt.Errorf("extracted file invalid: %s", m.Base)
 		}
-		if extractBase == targetDir {
-			e = os.Rename(source, filepath.Join(pending, m.Base))
-		} else {
-			e = copyFile(source, filepath.Join(pending, m.Base))
-		}
+		e = os.Rename(source, filepath.Join(pending, m.Base))
 		if e != nil {
 			return "", e
 		}

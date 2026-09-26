@@ -43,3 +43,28 @@ func TestMixedFeaturedListIsReadyBeforeNetwork(t *testing.T) {
 		t.Fatal("returning to the cached featured list blocked the UI")
 	}
 }
+
+func TestBrickProSelectOpensKeyboardAndStartExits(t *testing.T) {
+	for _, mapping := range []struct {
+		kind, selectButton, startButton uint32
+	}{
+		{0x651, 4, 6},
+		{0x603, 6, 7},
+	} {
+		if got := buttonAction(mapping.kind, uint8(mapping.selectButton)); got != "edit" {
+			t.Fatalf("SELECT mapped to %q", got)
+		}
+		if got := buttonAction(mapping.kind, uint8(mapping.startButton)); got != "quit" {
+			t.Fatalf("START mapped to %q", got)
+		}
+	}
+	a := &App{running: true, mode: "results"}
+	a.press("edit")
+	if a.mode != "keyboard" {
+		t.Fatal("SELECT did not open keyboard")
+	}
+	a.press("quit")
+	if a.running {
+		t.Fatal("START did not end the app")
+	}
+}

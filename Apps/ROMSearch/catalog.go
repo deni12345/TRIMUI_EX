@@ -332,6 +332,14 @@ func catalogMixed(ctx context.Context, source, query string, installed []System)
 	if e != nil {
 		return nil, e
 	}
+	result := gamesFromPage(source, raw, page, installed)
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no games available from %s", source)
+	}
+	return result, nil
+}
+
+func gamesFromPage(source, raw, page string, installed []System) []Game {
 	if source == "CoolROM" {
 		page = strings.Split(page, "Top 25 Downloaded ROMs")[0]
 	}
@@ -385,13 +393,33 @@ func catalogMixed(ctx context.Context, source, query string, installed []System)
 			add(link[0], link[1], "")
 		}
 	}
-	if len(result) == 0 {
-		return nil, fmt.Errorf("no games available from %s", source)
+	return result
+}
+
+func catalogSystemPage(ctx context.Context, source string, system System, pageNumber int) ([]Game, bool, error) {
+	raw := pageURL(source, system, pageNumber, "")
+	content, err := readPageContext(ctx, raw)
+	if err != nil {
+		return nil, false, err
 	}
-	if len(result) > 120 {
-		result = result[:120]
+	all := gamesFromPage(source, raw, content, []System{system})
+	base, _ := url.Parse(raw)
+	hasNext := false
+	for _, link := range links(content) {
+		u, err := base.Parse(link[0])
+		if err != nil || u.Hostname() != base.Hostname() {
+			continue
+		}
+		if source == "RomsFun" {
+			hasNext = strings.TrimRight(u.Path, "/") == fmt.Sprintf("/roms/%s/page/%d", system.Fun, pageNumber+1)
+		} else {
+			hasNext = strings.TrimRight(u.Path, "/") == "/roms/"+slug(system, source) && u.Query().Get("page") == strconv.Itoa(pageNumber+1)
+		}
+		if hasNext {
+			break
+		}
 	}
-	return result, nil
+	return all, hasNext, nil
 }
 func catalog(ctx context.Context, source string, s System, page int, query string) ([]Game, bool, error) {
 	raw := pageURL(source, s, page, query)

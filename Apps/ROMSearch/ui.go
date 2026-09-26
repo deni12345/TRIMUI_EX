@@ -37,6 +37,7 @@ var sdl struct {
 	GameControllerOpen       func(int32) uintptr
 	GameControllerClose      func(uintptr)
 	GameControllerEventState func(int32) int32
+	JoystickEventState       func(int32) int32
 	Box                      func(uintptr, int32, int32, int32, int32, uint8, uint8, uint8, uint8) int32
 	String                   func(uintptr, int32, int32, string, uint8, uint8, uint8, uint8) int32
 	LoadTexture              func(uintptr, string) uintptr
@@ -73,6 +74,7 @@ func bindSDL() error {
 	purego.RegisterLibFunc(&sdl.GameControllerOpen, lib, "SDL_GameControllerOpen")
 	purego.RegisterLibFunc(&sdl.GameControllerClose, lib, "SDL_GameControllerClose")
 	purego.RegisterLibFunc(&sdl.GameControllerEventState, lib, "SDL_GameControllerEventState")
+	purego.RegisterLibFunc(&sdl.JoystickEventState, lib, "SDL_JoystickEventState")
 	purego.RegisterLibFunc(&sdl.Box, gfx, "boxRGBA")
 	purego.RegisterLibFunc(&sdl.String, gfx, "stringRGBA")
 	imageLib, e := purego.Dlopen("libSDL2_image-2.0.so.0", purego.RTLD_NOW|purego.RTLD_GLOBAL)
@@ -110,14 +112,20 @@ var symbolRows = [][]keyboardKey{
 }
 
 type result struct {
-	kind  string
-	id    int
-	key   string
-	games []Game
-	err   error
+	kind        string
+	id          int
+	key         string
+	games       []Game
+	systemIndex int
+	pageNumber  int
+	hasNext     bool
+	err         error
 }
 type catalogPage struct {
-	games []Game
+	games      []Game
+	pages      []int
+	nextSystem int
+	hasMore    bool
 }
 type App struct {
 	source           int
@@ -133,6 +141,13 @@ type App struct {
 	loading          bool
 	browseID         int
 	browseCancel     context.CancelFunc
+	moreCancel       context.CancelFunc
+	moreBusy         bool
+	pendingAdvance   bool
+	pendingIndex     int
+	pages            []int
+	nextSystem       int
+	hasMore          bool
 	status           string
 	showStatus       bool
 	catalogError     bool
@@ -176,9 +191,11 @@ func newApp() *App {
 		return a
 	}
 	a.games = featuredGames(a.systems)
-	a.cache["RomsGames|"] = catalogPage{games: a.games}
+	a.pages = make([]int, len(a.systems))
+	a.hasMore = true
+	a.cache["RomsGames|"] = catalogPage{games: a.games, pages: a.pages, hasMore: true}
 	if !a.showStatus {
-		a.status = fmt.Sprintf("%d featured games  |  Y search", len(a.games))
+		a.status = fmt.Sprintf("%d featured games  |  SELECT type", len(a.games))
 	}
 	return a
 }
@@ -186,23 +203,35 @@ func (a *App) browse() {
 	if a.busy || len(a.systems) == 0 {
 		return
 	}
+	if a.moreCancel != nil {
+		a.moreCancel()
+		a.moreCancel = nil
+	}
+	a.moreBusy = false
+	a.pendingAdvance = false
+	a.pendingIndex = 0
+	a.browseID++
 	source, query := sources[a.source], a.query
 	key := source + "|" + query
 	if cached, found := a.cache[key]; found {
 		a.games = cached.games
+		a.pages = cached.pages
+		a.nextSystem = cached.nextSystem
+		a.hasMore = cached.hasMore
 		a.displaySource = a.source
 		a.showStatus = false
 		a.catalogError = false
 		a.preloadPage = -1
 		a.selected = 0
 		a.mode = "results"
-		a.status = fmt.Sprintf("%d games  |  Y search", len(cached.games))
+		a.status = fmt.Sprintf("%d games  |  SELECT type", len(cached.games))
 		return
 	}
 	a.busy = true
 	a.loading = true
-	a.browseID++
 	a.games = nil
+	a.pages = nil
+	a.hasMore = false
 	a.selected = 0
 	a.preloadPage = -1
 	a.status = "Loading games... X switches, B cancels"
@@ -219,12 +248,47 @@ func (a *App) browse() {
 		log.Printf("catalog queued: id=%d source=%s", id, source)
 	}()
 }
+func (a *App) loadMore() {
+	if a.busy || a.moreBusy || !a.hasMore || a.query != "" || len(a.games) == 0 {
+		return
+	}
+	for tried := 0; tried < len(a.systems); tried++ {
+		index := (a.nextSystem + tried) % len(a.systems)
+		if a.pages[index] < 0 {
+			continue
+		}
+		a.nextSystem = (index + 1) % len(a.systems)
+		a.moreBusy = true
+		ctx, cancel := context.WithCancel(context.Background())
+		a.moreCancel = cancel
+		id, number, system, source := a.browseID, a.pages[index]+1, a.systems[index], sources[a.source]
+		go func() {
+			games, next, err := catalogSystemPage(ctx, source, system, number)
+			log.Printf("catalog page: %s %s page %d, %d games, next=%v, error=%v", source, system.Folder, number, len(games), next, err)
+			a.messages <- result{kind: "more", id: id, games: games, systemIndex: index, pageNumber: number, hasNext: next, err: err}
+		}()
+		return
+	}
+	a.hasMore = false
+	a.pendingAdvance = false
+	a.cache[sources[a.source]+"|"+a.query] = catalogPage{games: a.games, pages: a.pages, nextSystem: a.nextSystem, hasMore: false}
+}
+func (a *App) maybeLoadMore() {
+	if a.mode == "results" && len(a.games) > 0 && a.selected >= len(a.games)-8 {
+		a.loadMore()
+	}
+}
 func (a *App) cancelLoading() {
 	if a.browseCancel != nil {
 		a.browseCancel()
 		a.browseCancel = nil
 	}
 	a.browseID++
+	if a.moreCancel != nil {
+		a.moreCancel()
+		a.moreCancel = nil
+	}
+	a.moreBusy = false
 	a.busy = false
 	a.loading = false
 	a.mode = "results"
@@ -264,7 +328,10 @@ func (a *App) poll() bool {
 					a.showStatus = true
 					a.catalogError = true
 				} else {
-					a.cache[r.key] = catalogPage{games: r.games}
+					a.pages = make([]int, len(a.systems))
+					a.nextSystem = 0
+					a.hasMore = a.query == ""
+					a.cache[r.key] = catalogPage{games: r.games, pages: a.pages, hasMore: a.hasMore}
 					a.mode = "results"
 					a.games = r.games
 					a.displaySource = a.source
@@ -272,7 +339,40 @@ func (a *App) poll() bool {
 					a.catalogError = false
 					a.preloadPage = -1
 					a.selected = 0
-					a.status = fmt.Sprintf("%d games  |  Y search", len(r.games))
+					a.status = fmt.Sprintf("%d games  |  SELECT type", len(r.games))
+				}
+			case "more":
+				if r.id != a.browseID {
+					continue
+				}
+				a.moreBusy = false
+				a.moreCancel = nil
+				if r.err != nil {
+					log.Printf("catalog page skipped: %v", r.err)
+				}
+				if r.err != nil || len(r.games) == 0 || !r.hasNext {
+					a.pages[r.systemIndex] = -1
+				} else {
+					a.pages[r.systemIndex] = r.pageNumber
+				}
+				seen := make(map[string]bool, len(a.games))
+				for _, game := range a.games {
+					seen[game.URL] = true
+				}
+				oldCount := len(a.games)
+				for _, game := range r.games {
+					if !seen[game.URL] {
+						a.games = append(a.games, game)
+						seen[game.URL] = true
+					}
+				}
+				if a.pendingAdvance && len(a.games) > oldCount {
+					a.selected = min(len(a.games)-1, a.pendingIndex)
+					a.pendingAdvance = a.selected < a.pendingIndex
+				}
+				a.cache[sources[a.source]+"|"+a.query] = catalogPage{games: a.games, pages: a.pages, nextSystem: a.nextSystem, hasMore: a.hasMore}
+				if (len(a.games) == oldCount || a.pendingAdvance) && a.hasMore {
+					a.loadMore()
 				}
 			case "cover":
 				delete(a.coverPending, r.key)
@@ -365,6 +465,18 @@ func (a *App) preloadNearby(renderer uintptr) bool {
 	}
 	page := a.selected / 8
 	if page != a.preloadPage {
+		keep := make(map[string]bool)
+		for i := max(0, (page-1)*8); i < len(a.games) && i < (page+2)*8; i++ {
+			keep[coverPath(a.games[i])] = true
+		}
+		for path, texture := range a.textures {
+			if !keep[path] {
+				if texture != 0 {
+					sdl.DestroyTexture(texture)
+				}
+				delete(a.textures, path)
+			}
+		}
 		a.preloadPage = page
 		a.preloadIndex = page * 8
 	}
@@ -448,7 +560,7 @@ func (a *App) press(action string) {
 			a.mode = "results"
 		} else {
 			a.mode = "keyboard"
-			a.status = "Type a name, then press START"
+			a.status = "Type a name, then choose GO"
 		}
 	case "search":
 		if len(strings.TrimSpace(a.query)) < 3 {
@@ -488,7 +600,12 @@ func (a *App) press(action string) {
 			}
 			a.moveKeyVertical(step)
 		} else if len(a.games) > 0 {
+			if step > 0 && a.selected+step >= len(a.games) && a.hasMore {
+				a.pendingAdvance = true
+				a.pendingIndex = a.selected + step
+			}
 			a.selected = max(0, min(len(a.games)-1, a.selected+step))
+			a.maybeLoadMore()
 		}
 	case "left", "right", "pagePrev", "pageNext":
 		step := 1
@@ -509,7 +626,12 @@ func (a *App) press(action string) {
 			}
 			a.keyX = max(0, min(len(a.keyRows()[a.keyY])-1, a.keyX+step))
 		} else if len(a.games) > 0 {
+			if step > 0 && a.selected+step >= len(a.games) && a.hasMore {
+				a.pendingAdvance = true
+				a.pendingIndex = a.selected + step
+			}
 			a.selected = max(0, min(len(a.games)-1, a.selected+step))
+			a.maybeLoadMore()
 		}
 	}
 }
@@ -552,6 +674,69 @@ func badgeLabel(folder string) string {
 	}
 	return folder
 }
+
+func buttonAction(kind uint32, button uint8) string {
+	// SDL's controller mapping can omit a device button. The matching raw
+	// joystick buttons provide a fallback on the Brick Pro's virtual pad.
+	switch kind {
+	case 0x651: // SDL_CONTROLLERBUTTONDOWN
+		switch button {
+		case 0:
+			return "back"
+		case 1:
+			return "accept"
+		case 2:
+			return "edit"
+		case 3:
+			return "source"
+		case 4:
+			return "edit" // SELECT
+		case 6:
+			return "quit" // START
+		case 9:
+			return "pagePrev"
+		case 10:
+			return "pageNext"
+		case 11:
+			return "up"
+		case 12:
+			return "down"
+		case 13:
+			return "left"
+		case 14:
+			return "right"
+		}
+	case 0x603: // SDL_JOYBUTTONDOWN, X360 raw button order
+		switch button {
+		case 6:
+			return "edit" // SELECT
+		case 7:
+			return "quit" // START
+		}
+	}
+	return ""
+}
+
+func physicalButton(kind uint32, button uint8) uint8 {
+	if kind == 0x651 {
+		switch button {
+		case 4:
+			return 1 // SELECT
+		case 6:
+			return 2 // START
+		}
+	}
+	if kind == 0x603 {
+		switch button {
+		case 6:
+			return 1
+		case 7:
+			return 2
+		}
+	}
+	return 0
+}
+
 func (a *App) render(r uintptr) {
 	sdl.SetRenderDrawColor(r, 14, 19, 31, 255)
 	sdl.RenderClear(r)
@@ -561,6 +746,9 @@ func (a *App) render(r uintptr) {
 	totalPages := max(1, (len(a.games)+7)/8)
 	currentPage := a.selected/8 + 1
 	count := fmt.Sprintf("%d GAMES %d/%d", len(a.games), currentPage, totalPages)
+	if a.hasMore {
+		count = fmt.Sprintf("%d GAMES %d/+", len(a.games), currentPage)
+	}
 	if len(a.games) == 0 {
 		count = "0 GAMES"
 	}
@@ -582,7 +770,7 @@ func (a *App) render(r uintptr) {
 	}
 	label(r, 15, 29, "SEARCH: "+searchText, [3]uint8{210, 223, 239})
 	if a.mode == "keyboard" {
-		label(r, 10, 55, "A TYPE   B DELETE   START SEARCH   Y CLOSE", [3]uint8{210, 223, 239})
+		label(r, 10, 55, "A TYPE   B DELETE   GO SEARCH   SELECT CLOSE", [3]uint8{210, 223, 239})
 		panel(r, 0, 85, 512, 260, [3]uint8{193, 198, 207})
 		label(r, 20, 95, "SEARCH GAMES", [3]uint8{53, 60, 70})
 		for y, row := range a.keyRows() {
@@ -616,7 +804,7 @@ func (a *App) render(r uintptr) {
 				message = "SOURCE UNAVAILABLE"
 			}
 			label(r, 160, 162, message, [3]uint8{210, 223, 239})
-			label(r, 145, 184, "X NEXT SOURCE  Y SEARCH", [3]uint8{155, 175, 195})
+			label(r, 120, 184, "X NEXT SOURCE  SELECT KEYBOARD", [3]uint8{155, 175, 195})
 		}
 		top := (a.selected / 8) * 8
 		for i := top; i < len(a.games) && i < top+8; i++ {
@@ -668,9 +856,12 @@ func (a *App) render(r uintptr) {
 		}
 	}
 	label(r, 10, 356, status, [3]uint8{255, 215, 130})
-	footer := "A INSTALL  L/R PAGE  X SOURCE  Y SEARCH  SELECT EXIT"
+	footer := "A INSTALL  L/R PAGE  X SOURCE  SELECT TYPE  START EXIT"
+	if a.moreBusy {
+		footer = "LOADING MORE...  L/R PAGE  SELECT TYPE  START EXIT"
+	}
 	if a.job != nil && (a.job.State == "queued" || a.job.State == "running") {
-		footer = "L/R PAGE  X SOURCE  Y SEARCH  SELECT EXIT (DL RUNS)"
+		footer = "L/R PAGE  X SOURCE  SELECT TYPE  START EXIT (DL RUNS)"
 	}
 	label(r, 10, 373, footer, [3]uint8{210, 223, 239})
 	if path := os.Getenv("ROM_SEARCH_CAPTURE"); path != "" && !a.captured {
@@ -725,6 +916,7 @@ func runUI() error {
 	log.Printf("startup: renderer created %s", time.Since(started))
 	sdl.RenderSetLogicalSize(renderer, 512, 384)
 	sdl.GameControllerEventState(1)
+	sdl.JoystickEventState(1)
 	var controller uintptr
 	if sdl.NumJoysticks() > 0 {
 		controller = sdl.GameControllerOpen(0)
@@ -741,6 +933,8 @@ func runUI() error {
 	var axisDirection [2]int
 	var axisRepeatAt [2]time.Time
 	traceInput := os.Getenv("ROM_SEARCH_TRACE_INPUT") == "1"
+	var lastPhysicalButton uint8
+	lastButtonAt := time.Time{}
 	handleEvent := func(event *[64]byte) {
 		kind := binary.LittleEndian.Uint32(event[:4])
 		action := ""
@@ -804,32 +998,17 @@ func runUI() error {
 				}
 			}
 		}
-		if kind == 0x651 {
-			switch event[12] {
-			case 0:
-				action = "back"
-			case 1:
-				action = "accept"
-			case 2:
-				action = "edit"
-			case 3:
-				action = "source"
-			case 4:
-				action = "quit"
-			case 6:
-				action = "search"
-			case 9:
-				action = "pagePrev"
-			case 10:
-				action = "pageNext"
-			case 11:
-				action = "up"
-			case 12:
-				action = "down"
-			case 13:
-				action = "left"
-			case 14:
-				action = "right"
+		if kind == 0x651 || kind == 0x603 {
+			physical := physicalButton(kind, event[12])
+			if physical != 0 {
+				if physical == lastPhysicalButton && time.Since(lastButtonAt) < 50*time.Millisecond {
+					return
+				}
+				lastPhysicalButton, lastButtonAt = physical, time.Now()
+			}
+			action = buttonAction(kind, event[12])
+			if physical != 0 && action != "" {
+				log.Printf("button: kind=%#x code=%d action=%s", kind, event[12], action)
 			}
 		}
 		if action != "" {
@@ -838,7 +1017,7 @@ func runUI() error {
 			if traceInput {
 				log.Printf("input: kind=%#x action=%s selected=%d mode=%s query=%q", kind, action, app.selected, app.mode, app.query)
 			}
-		} else if traceInput && (kind == 0x650 || kind == 0x651 || kind == 0x300) {
+		} else if traceInput && (kind == 0x650 || kind == 0x651 || kind == 0x603 || kind == 0x300) {
 			log.Printf("input: unmapped kind=%#x value=%d", kind, event[12])
 		}
 	}
