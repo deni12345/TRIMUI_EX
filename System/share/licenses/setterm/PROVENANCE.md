@@ -8,6 +8,6 @@ https://deb.debian.org/debian/pool/main/u/util-linux/.
 - Binary SHA-256: `de29482daaddf2b764bd7f979f526d3b180dc97ee9937a42d769a16eab0b060c`.
 - Requires the bundled libtinfo.so.6 and stock AArch64 libc.
 - Exact source, Debian patches/build rules and `.dsc`: `sources/util-linux/`
-  in the repository and in the release's `TRIMUI_EX-sources.zip` asset.
+  in the repository and in the GitHub source archive for this tag.
 
 Copyright notices and GPLv2 are adjacent to this file.

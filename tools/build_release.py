@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build device and corresponding-source ZIPs from this checkout."""
+"""Build a validated device ZIP from this checkout."""
 import hashlib
 import os
 from pathlib import Path
@@ -106,7 +106,6 @@ def main():
         staging = Path(staging)
         python_payload = staging / "python.zip"
         device_zip = staging / "TRIMUI_EX.zip"
-        source_zip = staging / "TRIMUI_EX-sources.zip"
         build_python_payload(python_payload)
         with zipfile.ZipFile(device_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
             for directory in DEVICE_DIRS:
@@ -119,21 +118,8 @@ def main():
                 archive.writestr(name, b"")
             add_file(archive, ROOT / "LICENSE.txt", "LICENSE.txt")
         count = validate_device(device_zip)
-        with zipfile.ZipFile(source_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-            for path in sorted((ROOT / "sources").rglob("*")):
-                if path.is_file():
-                    add_file(archive, path, path.relative_to(ROOT).as_posix())
-            add_file(archive, ROOT / "LICENSE.txt", "LICENSE.txt")
-        with zipfile.ZipFile(source_zip) as archive:
-            if archive.testzip() is not None or not any(
-                    n.startswith("sources/bash/") for n in archive.namelist()) or not any(
-                    n.startswith("sources/util-linux/") for n in archive.namelist()):
-                raise RuntimeError("corresponding-source ZIP is incomplete")
-            source_count = len(archive.namelist())
-        for staged in (device_zip, source_zip):
-            os.replace(staged, ROOT / staged.name)
+        os.replace(device_zip, ROOT / device_zip.name)
         describe(ROOT / device_zip.name, count)
-        describe(ROOT / source_zip.name, source_count)
 
 
 if __name__ == "__main__":

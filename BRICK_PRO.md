@@ -128,9 +128,9 @@ not modified by this integration.
 
 New Bash and setterm binaries have package/binary hashes and licensing information
 under `System/share/licenses/`. Exact corresponding source and Debian build
-patches are under `sources/` in the repository and in the release's separate
-`TRIMUI_EX-sources.zip` asset.
+patches are under `sources/` in the repository and the tag's generated source
+archive on GitHub.
 
-Run `sh do_release.sh` to build and validate the device and corresponding-source
-ZIPs. Tests stay in the source repository and are not bundled in the release
-ZIPs. Backups, logs and Python caches are also excluded.
+Run `sh do_release.sh` to build and validate the device ZIP. Tests and source
+packages stay in the repository and are not bundled in the device ZIP. Backups,
+logs and Python caches are also excluded.

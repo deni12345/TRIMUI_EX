@@ -28,6 +28,6 @@ ready-to-play ports. Individual ports may require other game data or runtimes.
 The device ZIP now contains runtime files only. It omits ROM Search Go sources,
 build scripts, repository documentation, and Python test and bytecode cache
 files. The Python installer still contains Python modules, pip and SSL support.
-Corresponding Bash and setterm sources are supplied as the separate
-`TRIMUI_EX-sources.zip` release asset. ROM Search includes the current
-controller, catalog pagination and direct extraction updates.
+Corresponding Bash and setterm sources are available in the repository's
+tagged source archive. ROM Search includes the current controller, catalog
+pagination and direct extraction updates.
